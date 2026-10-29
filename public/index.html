@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>QQ Bot 面板</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="login" class="login hidden">
+    <form class="login-card" id="login-form">
+      <div class="login-logo">🐧</div>
+      <h1>QQ Bot 面板</h1>
+      <input name="username" placeholder="用户名" value="admin" autocomplete="username" />
+      <input name="password" type="password" placeholder="密码" autocomplete="current-password" required />
+      <button type="submit" class="btn primary block">登录</button>
+      <p class="form-error" id="login-error"></p>
+    </form>
+  </div>
+
+  <div id="app" class="app hidden">
+    <nav class="rail">
+      <div class="rail-bots" id="rail-bots"></div>
+      <button class="rail-btn" id="btn-add-bot" title="添加机器人账号">＋</button>
+      <div class="rail-spacer"></div>
+      <button class="rail-btn" id="btn-settings" title="设置">⚙</button>
+    </nav>
+
+    <aside class="sidebar">
+      <div class="sidebar-head">
+        <div class="bot-card" id="bot-card"></div>
+        <div class="search-row">
+          <input id="conv-search" placeholder="搜索会话" />
+          <button class="icon-btn" id="btn-add-conv" title="手动添加会话">＋</button>
+        </div>
+        <div class="tabs" id="sidebar-tabs">
+          <button data-tab="chats" class="active">消息</button>
+          <button data-tab="events">事件</button>
+          <button data-tab="logs">日志</button>
+        </div>
+      </div>
+      <div class="sidebar-body" id="sidebar-body"></div>
+    </aside>
+
+    <main class="chat" id="chat">
+      <div class="empty-state" id="chat-empty">
+        <div class="empty-icon">💬</div>
+        <p>选择一个会话开始聊天</p>
+        <p class="muted small">机器人被拉进群、或有人发消息后，会话会自动出现在左侧</p>
+      </div>
+      <div class="chat-inner hidden" id="chat-inner">
+        <header class="chat-head">
+          <button class="icon-btn mobile-only" id="btn-back">‹</button>
+          <div class="chat-title">
+            <div class="chat-name" id="chat-name"></div>
+            <div class="chat-sub" id="chat-sub"></div>
+          </div>
+          <button class="icon-btn" id="btn-toggle-panel" title="群成员 / 详情">☰</button>
+        </header>
+        <div class="messages" id="messages"></div>
+        <div class="composer">
+          <div class="reply-bar hidden" id="reply-bar"></div>
+          <div class="window-bar" id="window-bar"></div>
+          <div class="toolbar">
+            <button class="tool" id="btn-image" title="发送图片">🖼 图片</button>
+            <button class="tool" id="btn-file" title="发送视频/语音/文件">📎 文件</button>
+            <button class="tool" id="btn-url-media" title="通过网址发送媒体">🔗 网址</button>
+            <button class="tool" id="btn-at" title="@成员（Markdown）">@ 成员</button>
+            <label class="tool toggle"><input type="checkbox" id="opt-markdown" /> Markdown</label>
+            <select class="tool" id="opt-mode" title="发送方式">
+              <option value="auto">自动（优先被动回复）</option>
+              <option value="passive">仅被动回复</option>
+              <option value="active">仅主动消息</option>
+            </select>
+            <input type="file" id="file-image" accept="image/png,image/jpeg,image/gif" hidden />
+            <input type="file" id="file-any" hidden />
+          </div>
+          <div class="attach-preview hidden" id="attach-preview"></div>
+          <textarea id="input" rows="3" placeholder="输入消息，Enter 发送，Shift+Enter 换行"></textarea>
+          <div class="composer-foot">
+            <span class="muted small" id="composer-hint"></span>
+            <button class="btn primary" id="btn-send">发送</button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <aside class="panel hidden" id="panel"></aside>
+  </div>
+
+  <div class="modal-mask hidden" id="modal-mask">
+    <div class="modal" id="modal"></div>
+  </div>
+  <div class="toasts" id="toasts"></div>
+  <div class="mention-pop hidden" id="mention-pop"></div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

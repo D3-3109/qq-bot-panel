@@ -1,0 +1,17 @@
+services:
+  qq-bot-panel:
+    image: ghcr.io/d3-3109/qq-bot-panel:latest
+    build: .
+    container_name: qq-bot-panel
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    ports:
+      # 放在反向代理后面时改为 "127.0.0.1:3000:3000"
+      - "${PANEL_PORT:-3000}:3000"
+    volumes:
+      - panel-data:/data
+
+volumes:
+  panel-data:
