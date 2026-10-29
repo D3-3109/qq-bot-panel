@@ -4,8 +4,54 @@ import { textNode, attachmentNode, arkNode, quotedFromElements, outMediaNode, pl
 
 const ROLE_TEXT = { owner: '群主', admin: '管理员' };
 
-export function showLightbox(url) {
-  const box = h('div', { class: 'lightbox', onclick: () => box.remove() }, h('img', { src: url, referrerpolicy: 'no-referrer' }));
+// 图片大图预览，可收藏为表情
+export function showLightbox(info) {
+  const { src, msg, idx } = typeof info === 'string' ? { src: info } : info;
+  let mediaId = info.mediaId || null;
+  const close = () => {
+    box.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  const onKey = (e) => e.key === 'Escape' && close();
+  document.addEventListener('keydown', onKey);
+
+  const already = () => mediaId && state.stickers.some((s) => s.mediaId === mediaId);
+  const favBtn = h('button', { class: 'btn small' }, already() ? '已收藏' : '☆ 收藏为表情');
+  favBtn.disabled = already();
+  favBtn.onclick = async (e) => {
+    e.stopPropagation();
+    favBtn.disabled = true;
+    try {
+      if (!mediaId && msg) {
+        const m = await api('POST', `/api/bots/${state.botId}/messages/${msg.id}/attachments/${idx}/cache`);
+        mediaId = m.id;
+      }
+      if (!mediaId) throw new Error('这张图片无法收藏');
+      const s = await api('POST', '/api/stickers', { mediaId });
+      favBtn.textContent = '已收藏';
+      toast(s.existed ? '已在表情收藏中' : '已收藏为表情', 'ok');
+    } catch (err) {
+      favBtn.disabled = false;
+      toast(err.message, 'error');
+    }
+  };
+  const sendBtn = h('button', { class: 'btn small' }, '再发一次');
+  sendBtn.onclick = async (e) => {
+    e.stopPropagation();
+    try {
+      if (!mediaId && msg) mediaId = (await api('POST', `/api/bots/${state.botId}/messages/${msg.id}/attachments/${idx}/cache`)).id;
+      if (!mediaId) throw new Error('这张图片无法转发');
+      close();
+      actions.sendImage({ mediaId });
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  };
+  const openBtn = h('a', { class: 'btn small', href: src, target: '_blank', rel: 'noopener noreferrer', onclick: (e) => e.stopPropagation() }, '原图');
+  const box = h('div', { class: 'lightbox', onclick: close },
+    h('img', { src, referrerpolicy: 'no-referrer', onclick: (e) => e.stopPropagation() }),
+    h('div', { class: 'lightbox-bar', onclick: (e) => e.stopPropagation() },
+      state.current ? sendBtn : null, favBtn, openBtn, h('button', { class: 'btn small', onclick: close }, '关闭')));
   document.body.append(box);
 }
 
@@ -21,6 +67,7 @@ export function renderChatHead() {
   }
   if (conv.status === 'removed') sub.push('机器人已被移出');
   if (conv.status === 'rejected') sub.push('已关闭主动消息');
+  if (conv.type === 'group') sub.push(conv.fullSeen ? '接收全部消息' : '仅接收 @机器人 的消息');
   $('#chat-sub').textContent = sub.join(' · ');
   renderWindowBar();
 }
@@ -75,12 +122,15 @@ function msgNode(m, prev) {
       : (p.messageType === 103 ? quotedFromElements(p.msgElements, nameOf) : '');
     if (quoteText) bubble.append(h('div', { class: 'quote' }, quoteText));
     if (m.content && m.content.trim()) bubble.append(textNode(m.content.trim(), { markdown: out && p.markdown, nameOf }));
-    for (const a of p.attachments || []) bubble.append(attachmentNode(a, showLightbox));
+    (p.attachments || []).forEach((a, idx) => bubble.append(attachmentNode(a, (info) => showLightbox({ ...info, msg: m, idx }))));
     if (p.arkData) bubble.append(arkNode(p.arkData));
     if (out && p.media) bubble.append(outMediaNode(p.media, showLightbox));
     if (!bubble.childNodes.length) {
       bubble.append(p.atBot ? h('span', { class: 'mention' }, `@${bot?.name || '机器人'}`) : h('span', { class: 'muted' }, '[不支持的消息类型]'));
     }
+    // 只有图片（表情包）时像 QQ 一样不套气泡
+    const kids = [...bubble.children];
+    if (kids.length && kids.every((k) => k.tagName === 'IMG')) bubble.classList.add('media-only');
   }
 
   const meta = h('div', { class: 'msg-meta' });
@@ -97,6 +147,11 @@ function msgNode(m, prev) {
   if (m.status !== 'recalled') {
     acts.append(h('button', { onclick: () => actions.setReply(m) }, '回复'));
     acts.append(h('button', { onclick: () => copyText(m.content) }, '复制'));
+    const imgIdx = (m.payload?.attachments || []).findIndex((a) => String(a.content_type || '').startsWith('image'));
+    const outImage = out && m.payload?.media?.type === 'image' && m.payload.media.mediaId;
+    if (imgIdx >= 0 || outImage) {
+      acts.append(h('button', { class: 'fav', onclick: () => favImage(m, imgIdx, outImage ? m.payload.media.mediaId : null) }, '☆收藏'));
+    }
     if (!out && m.authorId && state.current?.type === 'group') acts.append(h('button', { onclick: () => actions.insertMention(m.authorId) }, '@TA'));
     if (m.msgId && (out || state.current?.type === 'group') && m.status === 'ok' && Date.now() - m.ts < 2 * 60_000) {
       acts.append(h('button', { onclick: () => actions.recall(m) }, '撤回'));
@@ -112,6 +167,17 @@ function msgNode(m, prev) {
     out ? avatar(name, bot?.appId, { size: 'sm', img: bot?.avatar }) : avatar(name, m.authorId, { size: 'sm' }),
     h('div', { class: 'body' }, author, bubble, meta, acts)));
   return frag;
+}
+
+async function favImage(m, idx, mediaId) {
+  try {
+    let id = mediaId || m.payload.attachments?.[idx]?.mediaId;
+    if (!id) id = (await api('POST', `/api/bots/${state.botId}/messages/${m.id}/attachments/${idx}/cache`)).id;
+    const s = await api('POST', '/api/stickers', { mediaId: id });
+    toast(s.existed ? '已在表情收藏中' : '已收藏为表情', 'ok');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
 }
 
 function copyText(t) {
@@ -189,6 +255,27 @@ export function renderAttachment() {
   box.append(h('span', {}, `${label}：${a.name || a.url}`), h('button', { onclick: () => actions.setAttachment(null) }, '✕'));
 }
 
+function attachmentBody(a) {
+  if (!a) return undefined;
+  if (a.mediaId) return { type: 'image', mediaId: a.mediaId };
+  if (a.url) return { type: a.type, url: a.url, name: a.name };
+  return { type: a.type, name: a.name, data: a.data };
+}
+
+// 直接发送一张图片（收藏的表情或媒体库图片），不影响输入框里正在编辑的文字
+export async function sendImage({ stickerId, mediaId }) {
+  const conv = currentConv();
+  if (!conv) return;
+  const body = { text: '', replyMode: $('#opt-mode').value };
+  if (stickerId) body.stickerId = stickerId;
+  else body.media = { type: 'image', mediaId };
+  try {
+    await api('POST', `/api/bots/${state.botId}/conversations/${conv.type}/${encodeURIComponent(conv.peerId)}/messages`, body);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
 export async function sendCurrent() {
   const conv = currentConv();
   if (!conv) return;
@@ -200,9 +287,7 @@ export async function sendCurrent() {
     markdown: $('#opt-markdown').checked,
     replyMode: $('#opt-mode').value,
     quoteId: state.replyTo?.id,
-    media: state.attachment
-      ? { type: state.attachment.type, name: state.attachment.name, url: state.attachment.url, data: state.attachment.data, preview: state.attachment.type === 'image' && state.attachment.data && state.attachment.size < 300_000 ? state.attachment.preview : '' }
-      : undefined,
+    media: attachmentBody(state.attachment),
   };
   input.value = '';
   actions.setReply(null);

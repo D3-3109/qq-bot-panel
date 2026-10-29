@@ -305,3 +305,54 @@ select.tool { border: 1px solid var(--line); background: #fff; margin-left: auto
   .panel { width: 85vw; }
   #input { font-size: 16px; }
 }
+
+/* ---------- lightbox / stickers ---------- */
+.lightbox { flex-direction: column; gap: 14px; }
+.lightbox img { max-height: calc(92vh - 60px); cursor: default; border-radius: 6px; }
+.lightbox-bar { display: flex; gap: 8px; cursor: default; }
+.lightbox-bar .btn { background: rgba(255, 255, 255, .92); text-decoration: none; color: var(--text); }
+.bubble img.att.sticker { max-width: 160px; max-height: 160px; }
+.msg-actions button.fav { color: #d25f00; }
+
+.sticker-pop {
+  position: fixed; z-index: 60; width: 380px; max-width: calc(100vw - 24px); background: #fff; border-radius: 12px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .18); display: flex; flex-direction: column; max-height: 420px;
+  animation: pop .15s ease-out; transform-origin: bottom left;
+}
+.sticker-pop .sp-head { display: flex; gap: 6px; padding: 10px; border-bottom: 1px solid var(--line); align-items: center; }
+.sticker-pop .sp-head input { flex: 1; border: none; background: #f2f3f5; border-radius: 8px; padding: 6px 10px; outline: none; min-width: 0; }
+.sticker-pop .sp-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 6px; padding: 10px; overflow-y: auto;
+}
+.sticker-cell {
+  position: relative; aspect-ratio: 1; border-radius: 8px; background: #f7f8fa; border: none; padding: 4px;
+  display: grid; place-items: center; transition: background .12s, transform .1s;
+}
+.sticker-cell:hover { background: #e8f3ff; }
+.sticker-cell:active { transform: scale(.95); }
+.sticker-cell img { max-width: 100%; max-height: 100%; object-fit: contain; pointer-events: none; }
+.sticker-cell .kw {
+  position: absolute; left: 2px; right: 2px; bottom: 2px; font-size: 10px; color: #fff; background: rgba(0, 0, 0, .45);
+  border-radius: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 3px; pointer-events: none;
+}
+.sticker-cell .more {
+  position: absolute; top: 2px; right: 2px; width: 20px; height: 20px; border-radius: 50%; border: none; font-size: 12px;
+  background: rgba(255, 255, 255, .9); color: #4e5969; display: none; line-height: 20px; padding: 0;
+}
+.sticker-cell:hover .more { display: block; }
+.sticker-pop .sp-empty { padding: 30px 16px; text-align: center; color: var(--muted); font-size: 13px; line-height: 1.7; grid-column: 1 / -1; }
+
+.suggest-bar {
+  display: flex; gap: 6px; overflow-x: auto; padding: 6px 2px; margin-bottom: 4px; scrollbar-width: thin;
+  animation: fade .15s ease-out;
+}
+.suggest-bar .label { font-size: 12px; color: var(--muted); align-self: center; flex-shrink: 0; }
+.suggest-bar .sticker-cell { width: 64px; height: 64px; flex-shrink: 0; }
+.suggest-bar .sticker-cell.sel { outline: 2px solid var(--brand); }
+
+/* ---------- @ 提醒 / 接收模式 ---------- */
+.at-tag { color: var(--danger); font-weight: 600; margin-right: 2px; }
+.mode-hint { font-size: 12px; color: var(--muted); padding: 6px 14px; background: #fafbfc; border-bottom: 1px solid #f2f3f5; line-height: 1.5; }
+.msg.in.at-me .bubble { box-shadow: 0 0 0 2px #bedaff; }
+.bubble.media-only, .msg.out .bubble.media-only { background: transparent; box-shadow: none; padding: 0; }
+.bubble.media-only img.att { margin-top: 0; }

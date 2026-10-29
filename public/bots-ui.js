@@ -3,8 +3,8 @@ import { h, api, toast, openModal, confirmBox } from './lib.js';
 import { state, actions } from './state.js';
 
 const INTENT_OPTIONS = [
-  { bit: 1 << 25, label: '群聊与私聊事件（GROUP_AND_C2C_EVENT）', hint: '群 @消息、私聊、机器人进退群等，必选', required: true },
-  { bit: 1 << 24, label: '群成员事件（GROUP_MEMBER_EVENT）', hint: '成员进退群、加群申请；需平台开通，否则连接会被拒绝 (4014)' },
+  { bit: 1 << 25, label: '群聊与私聊事件（GROUP_AND_C2C_EVENT）', hint: '群消息、私聊、机器人进退群等，必选。群主在 QQ 里为机器人开启“接收全部消息”后，群内所有发言都会推送过来', required: true },
+  { bit: 1 << 24, label: '群成员事件（GROUP_MEMBER_EVENT）', hint: '成员进退群、加群申请（需机器人是管理员）。平台未开通时会自动取消勾选' },
   { bit: 1 << 26, label: '互动事件（INTERACTION）', hint: '消息按钮回调' },
 ];
 
@@ -22,7 +22,7 @@ export function botDialog(bot) {
       h('option', { value: 'websocket' }, 'WebSocket 长连接（推荐，无需公网 HTTPS）'),
       h('option', { value: 'webhook' }, 'Webhook 回调（需在开放平台配置 HTTPS 回调地址）'));
     mode.value = bot?.mode || 'websocket';
-    const intents = bot?.intents ?? (1 << 25);
+    const intents = bot?.intents ?? ((1 << 25) | (1 << 24));
     const checks = INTENT_OPTIONS.map((o) => {
       const cb = h('input', { type: 'checkbox', value: o.bit, checked: (intents & o.bit) !== 0, disabled: o.required });
       return { o, cb, el: h('label', {}, cb, h('span', {}, o.label, h('div', { class: 'muted small' }, o.hint))) };

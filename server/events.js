@@ -1,6 +1,8 @@
 // 将 QQ 推送事件转换为面板中的消息 / 事件记录
 import * as store from './store.js';
 import { broadcast } from './hub.js';
+import { config } from './config.js';
+import { fetchRemoteImage } from './media.js';
 
 function parseExt(scene) {
   const out = {};
@@ -21,7 +23,8 @@ function toMs(ts) {
 
 function previewOf(content, attachments, messageType) {
   const text = String(content || '')
-    .replace(/<@!?([^>]+)>/g, '@$1')
+    .replace(/<@all>/g, '@全体成员')
+    .replace(/<@!?([^>]+)>/g, '@成员')
     .replace(/<qqbot-at-user id="[^"]*"\s*\/>/g, '@成员')
     .replace(/<qqbot-at-everyone\s*\/>/g, '@全体成员')
     .replace(/<faceType=[^>]*>/g, '[表情]')
@@ -182,6 +185,8 @@ function handleMessage(bot, type, d, eventId) {
     ts: Date.now(),
   });
 
+  const fullMode = type === 'GROUP_MESSAGE_CREATE';
+
   if (!msg) {
     // 同一条消息可能同时以 @ 事件与全量事件推送
     if (atBot) {
@@ -189,20 +194,50 @@ function handleMessage(bot, type, d, eventId) {
       if (existing && !existing.payload.atBot) {
         const updated = store.updateMessage(existing.id, { payload: { ...existing.payload, atBot: true } });
         broadcast('message', updated);
+        const conv = store.upsertConversation(botId, convType, peerId, { at_unread: 1 });
+        broadcast('conversation', conv);
       }
     }
     return;
   }
 
-  const conv = store.upsertConversation(botId, convType, peerId, {
+  const patch = {
     last_ts: msg.ts,
     last_preview: `${isGroup ? `${msg.authorName}: ` : ''}${previewOf(d.content, d.attachments, d.message_type)}`,
     unreadInc: 1,
     hidden: 0,
     ...(store.getConversation(botId, convType, peerId)?.status === 'removed' ? {} : { status: 'active' }),
-  });
+  };
+  if (atBot) patch.at_unread = 1;
+  if (fullMode) patch.full_seen = 1;
+  const conv = store.upsertConversation(botId, convType, peerId, patch);
   broadcast('message', msg);
   broadcast('conversation', conv);
+  cacheAttachments(msg);
+}
+
+// QQ 图片链接有时效，收到后下载到本地媒体库，用于预览和收藏表情
+function cacheAttachments(msg) {
+  if (!config.cacheRemoteMedia) return;
+  const atts = msg.payload.attachments || [];
+  const jobs = atts.map((a, i) => ({ a, i })).filter(({ a }) => String(a.content_type || '').startsWith('image') && a.url);
+  if (!jobs.length) return;
+  (async () => {
+    let changed = false;
+    for (const { a, i } of jobs) {
+      try {
+        const m = await fetchRemoteImage(a.url, a.filename || '');
+        atts[i] = { ...a, mediaId: m.id };
+        changed = true;
+      } catch (e) {
+        console.warn(`缓存图片失败（消息 ${msg.id}）：${e.message}`);
+      }
+    }
+    if (!changed) return;
+    const current = store.getMessage(msg.id);
+    if (!current) return;
+    broadcast('message', store.updateMessage(msg.id, { payload: { ...current.payload, attachments: atts } }));
+  })();
 }
 
 export { previewOf, toMs };

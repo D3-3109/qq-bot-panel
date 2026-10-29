@@ -102,6 +102,48 @@ CREATE INDEX IF NOT EXISTS idx_events_bot ON events (bot_id, id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedupe ON events (bot_id, event_id) WHERE event_id != '';
 `);
 
+db.exec(`
+CREATE TABLE IF NOT EXISTS media (
+  id INTEGER PRIMARY KEY,
+  sha256 TEXT NOT NULL UNIQUE,
+  mime TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  width INTEGER NOT NULL DEFAULT 0,
+  height INTEGER NOT NULL DEFAULT 0,
+  name TEXT NOT NULL DEFAULT '',
+  file TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'upload',
+  source_url TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stickers (
+  id INTEGER PRIMARY KEY,
+  media_id INTEGER NOT NULL UNIQUE REFERENCES media(id),
+  keywords TEXT NOT NULL DEFAULT '',
+  use_count INTEGER NOT NULL DEFAULT 0,
+  last_used INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS media_uploads (
+  bot_id INTEGER NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+  conv_type TEXT NOT NULL,
+  peer_id TEXT NOT NULL,
+  media_id INTEGER NOT NULL REFERENCES media(id) ON DELETE CASCADE,
+  file_info TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  PRIMARY KEY (bot_id, conv_type, peer_id, media_id)
+);
+`);
+
+function addColumn(table, column, def) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${def}`);
+}
+addColumn('conversations', 'at_unread', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('conversations', 'full_seen', 'INTEGER NOT NULL DEFAULT 0');
+
 export function tx(fn) {
   db.exec('BEGIN');
   try {

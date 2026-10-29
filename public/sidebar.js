@@ -73,7 +73,7 @@ function renderConvs() {
         h('span', { class: 'title' }, c.type === 'group' ? h('span', { class: 'tag', style: 'margin-right:4px' }, '群') : null, c.name, ' ', statusTag),
         h('span', { class: 'time' }, c.lastTs ? fmtTime(c.lastTs) : '')),
       h('div', { class: 'row2' },
-        h('span', { class: 'preview' }, c.lastPreview || ''),
+        h('span', { class: 'preview' }, c.atUnread ? h('span', { class: 'at-tag' }, '[有人@我]') : null, c.lastPreview || ''),
         c.unread ? h('span', { class: 'badge' }, c.unread > 99 ? '99+' : c.unread) : null))));
   }
 }

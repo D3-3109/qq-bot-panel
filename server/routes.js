@@ -5,6 +5,10 @@ import * as bots from './bots.js';
 import * as store from './store.js';
 import { sendMessage, recallMessage } from './sender.js';
 import { addClient, broadcast } from './hub.js';
+import fs from 'node:fs';
+import { readBody } from './http.js';
+import * as media from './media.js';
+import * as stickers from './stickers.js';
 
 export const router = new Router();
 const r = (method, path, handler, opts) => router.add(method, path, handler, opts);
@@ -82,7 +86,10 @@ r('PATCH', '/api/bots/:id/conversations/:type/:peer', async (req, res, { params 
   const patch = {};
   if (body.remark !== undefined) patch.remark = str(body.remark, 60);
   if (body.hidden !== undefined) patch.hidden = body.hidden ? 1 : 0;
-  if (body.read) patch.unread = 0;
+  if (body.read) {
+    patch.unread = 0;
+    patch.at_unread = 0;
+  }
   const conv = store.upsertConversation(id, convType(params.type), peer(params.peer), patch);
   broadcast('conversation', conv);
   return conv;
@@ -174,4 +181,68 @@ r('POST', '/api/bots/:id/events/:eid/join-request', async (req, res, { params })
   const updated = store.eventRow(db.prepare('SELECT * FROM events WHERE id = ?').get(ev.id));
   broadcast('event', updated);
   return updated;
+});
+
+// ---- 媒体库 ----
+// 原始二进制上传（Content-Type 为图片类型），返回媒体记录
+r('POST', '/api/media', async (req) => {
+  const buf = await readBody(req, 10 * 1024 * 1024 + 1024);
+  return media.saveImage(buf, { name: str(req.headers['x-file-name'] ? decodeURIComponent(req.headers['x-file-name']) : '', 200) });
+}, { raw: true });
+
+r('GET', '/api/media/:mid', async (req, res, { params }) => {
+  const { row, file } = media.mediaFile(Number(params.mid));
+  res.writeHead(200, {
+    'Content-Type': row.mime,
+    'Content-Length': row.size,
+    'Cache-Control': 'private, max-age=31536000, immutable',
+    'X-Content-Type-Options': 'nosniff',
+    'Content-Security-Policy': "default-src 'none'",
+  });
+  fs.createReadStream(file).pipe(res);
+  return undefined;
+});
+
+// 把收到的 QQ 图片保存到媒体库（未自动缓存或缓存失败时）
+r('POST', '/api/bots/:id/messages/:mid/attachments/:idx/cache', async (req, res, { params }) => {
+  const id = botId(params);
+  const msg = store.getMessage(Number(params.mid));
+  if (!msg || msg.botId !== id) throw new HttpError(404, '消息不存在');
+  const idx = Number(params.idx);
+  const atts = msg.payload.attachments || [];
+  const a = atts[idx];
+  if (!a || !String(a.content_type || '').startsWith('image')) throw new HttpError(404, '图片不存在');
+  if (a.mediaId && media.getMedia(a.mediaId)) return media.getMedia(a.mediaId);
+  let m;
+  try {
+    m = await media.fetchRemoteImage(a.url, a.filename || '');
+  } catch (e) {
+    throw new HttpError(e.status || 502, `${e.message}（图片链接可能已过期）`);
+  }
+  atts[idx] = { ...a, mediaId: m.id };
+  broadcast('message', store.updateMessage(msg.id, { payload: { ...msg.payload, attachments: atts } }));
+  return m;
+});
+
+// ---- 表情收藏 ----
+r('GET', '/api/stickers', async () => stickers.listStickers());
+
+r('POST', '/api/stickers', async (req) => {
+  const body = await readJson(req);
+  const s = stickers.addSticker(Number(body.mediaId), str(body.keywords, 200));
+  broadcast('stickers', stickers.listStickers());
+  return s;
+});
+
+r('PATCH', '/api/stickers/:sid', async (req, res, { params }) => {
+  const body = await readJson(req);
+  const s = stickers.updateSticker(Number(params.sid), { keywords: body.keywords });
+  broadcast('stickers', stickers.listStickers());
+  return s;
+});
+
+r('DELETE', '/api/stickers/:sid', async (req, res, { params }) => {
+  stickers.deleteSticker(Number(params.sid));
+  broadcast('stickers', stickers.listStickers());
+  return { ok: true };
 });

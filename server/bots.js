@@ -114,6 +114,10 @@ function startRuntime(row) {
       onStatus: (s, detail) => setStatus(row.id, s, detail),
       log,
     });
+    rt.gateway.onIntentsDowngraded = (bits) => {
+      db.prepare('UPDATE bots SET intents = ? WHERE id = ?').run(bits, row.id);
+      broadcast('bot', getBot(row.id));
+    };
     rt.gateway.start();
   }
   return rt;

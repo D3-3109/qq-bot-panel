@@ -68,9 +68,12 @@ export function attachmentNode(a, onImage) {
   const ct = a.content_type || '';
   const url = fixUrl(a.url);
   if (ct.startsWith('image')) {
+    // 优先显示本地缓存，QQ 图片链接过期后仍可查看
+    const src = a.mediaId ? `/api/media/${a.mediaId}` : url;
     const ratio = a.width && a.height ? `aspect-ratio:${a.width}/${a.height};width:${Math.min(260, a.width, (260 * a.width) / a.height)}px` : '';
-    const img = h('img', { class: 'att', src: url, alt: a.filename || '图片', referrerpolicy: 'no-referrer', style: ratio || null });
-    img.addEventListener('click', () => onImage?.(url));
+    const img = h('img', { class: 'att', src, alt: a.filename || '图片', referrerpolicy: 'no-referrer', style: ratio || null });
+    if (a.mediaId) img.onerror = () => { img.onerror = null; img.src = url; };
+    img.addEventListener('click', () => onImage?.({ src, mediaId: a.mediaId || null, attachment: a }));
     return img;
   }
   if (ct.startsWith('video')) {
@@ -108,10 +111,13 @@ export function quotedFromElements(elements, nameOf) {
 
 export function outMediaNode(media, onImage) {
   if (!media) return null;
-  const src = media.preview || media.url;
+  const src = media.mediaId ? `/api/media/${media.mediaId}` : media.preview || media.url;
   if (media.type === 'image' && src) {
-    const img = h('img', { class: 'att', src, alt: media.name || '图片', referrerpolicy: 'no-referrer' });
-    img.addEventListener('click', () => onImage?.(src));
+    const ratio = media.width && media.height
+      ? `aspect-ratio:${media.width}/${media.height};width:${Math.min(media.stickerId ? 160 : 260, media.width, (260 * media.width) / media.height)}px`
+      : '';
+    const img = h('img', { class: `att ${media.stickerId ? 'sticker' : ''}`, src, alt: media.name || '图片', referrerpolicy: 'no-referrer', style: ratio || null });
+    img.addEventListener('click', () => onImage?.({ src, mediaId: media.mediaId || null }));
     return img;
   }
   if (media.type === 'video' && media.url) return h('video', { src: media.url, controls: true, preload: 'metadata' });

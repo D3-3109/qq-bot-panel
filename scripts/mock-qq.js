@@ -10,6 +10,11 @@ const APP_ID = process.env.MOCK_APPID || '102000001';
 const SECRET = process.env.MOCK_SECRET || 'mockSecretValue123';
 
 export const sent = [];
+let deniedIntentBits = 0;
+const TINY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAYAAAC56t6BAAAAEklEQVR4nGP4z8DwnwEIGJAZAEXyBPxZhbwFAAAAAElFTkSuQmCC',
+  'base64',
+);
 const sockets = new Set();
 let seq = 0;
 let token = crypto.randomBytes(8).toString('hex');
@@ -52,6 +57,15 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, dispatch(b.t, b.d));
   }
   if (p === '/_mock/sent') return json(res, 200, sent);
+  if (p === '/_mock/deny-intent') {
+    deniedIntentBits = Number(url.searchParams.get('bits') || 0);
+    return json(res, 200, { deniedIntentBits });
+  }
+  // 模拟 QQ 图床：返回一张 2x3 的 PNG
+  if (p.startsWith('/img/')) {
+    res.writeHead(200, { 'Content-Type': 'image/png' });
+    return res.end(TINY_PNG);
+  }
   if (p === '/_mock/kick') {
     for (const ws of sockets) ws.close(4009, 'expired');
     return json(res, 200, { ok: true });
@@ -107,6 +121,7 @@ wss.on('connection', (ws) => {
     if (msg.op === 1) ws.send(JSON.stringify({ op: 11 }));
     if (msg.op === 2) {
       if (msg.d.token !== `QQBot ${token}`) return ws.close(4004, 'auth fail');
+      if (deniedIntentBits && msg.d.intents & deniedIntentBits) return ws.close(4014, 'disallowed intents');
       ws.ready = true;
       ws.send(JSON.stringify({ op: 0, s: ++seq, t: 'READY', d: { version: 1, session_id: 'sess-1', user: { id: 'BOTUSER1', username: '测试机器人', bot: true }, shard: [0, 1] } }));
     }

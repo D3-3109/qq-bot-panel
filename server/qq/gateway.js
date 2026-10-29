@@ -163,6 +163,17 @@ export class Gateway {
     this.clearHeartbeat();
     if (this.stopped) return;
     const code = ev.code;
+    // 订阅了未开通的事件：退回到基础的群聊与私聊事件后重连
+    const BASE = 1 << 25;
+    if ((code === 4013 || code === 4014) && this.intents !== BASE) {
+      this.log('warn', `事件订阅 ${this.intents} 未开通 (${code})，已退回仅订阅群聊与私聊事件`);
+      this.intents = BASE;
+      this.onIntentsDowngraded?.(BASE);
+      this.sessionId = null;
+      this.seq = null;
+      this.scheduleReconnect();
+      return;
+    }
     if (FATAL_CLOSE[code]) {
       this.log('error', `连接被关闭 ${code}：${FATAL_CLOSE[code]}`);
       this.onStatus('error', `${FATAL_CLOSE[code]} (${code})`);

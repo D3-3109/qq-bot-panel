@@ -4,6 +4,8 @@ import { renderRail, renderBotCard, renderSidebar } from './sidebar.js';
 import { renderChatHead, renderMessages, upsertMessage, renderReplyBar, renderAttachment, renderWindowBar, sendCurrent } from './chat.js';
 import { renderPanel } from './panel.js';
 import { botDialog, settingsDialog } from './bots-ui.js';
+import { sendImage } from './chat.js';
+import { loadStickers, setStickers, toggleStickerPanel, uploadImageFile, renderSuggestions, handleSuggestKey } from './stickers-ui.js';
 
 // ---------------- 启动 / 登录 ----------------
 async function boot() {
@@ -39,6 +41,7 @@ async function startApp() {
   $('#app').classList.remove('hidden');
   bindUi();
   connectStream();
+  loadStickers();
   await reloadBots(Number(localStorage.getItem('botId')) || undefined);
 }
 
@@ -71,10 +74,12 @@ function connectStream() {
     if (state.current && m.convType === state.current.type && m.peerId === state.current.peerId) {
       upsertMessage(m);
       if (m.direction === 'in' && m.convType === 'group') refreshMembersSoon();
-    } else if (m.direction === 'in' && document.visibilityState !== 'visible') {
+    } else if (m.direction === 'in' && document.visibilityState !== 'visible' && (m.convType === 'c2c' || m.payload?.atBot)) {
+      // 全量模式下群消息很多，只对私聊和 @机器人 弹通知
       notify(m);
     }
   });
+  es.addEventListener('stickers', (e) => setStickers(JSON.parse(e.data)));
   es.addEventListener('event', (e) => {
     const ev = JSON.parse(e.data);
     if (ev.botId !== state.botId) return;
@@ -262,6 +267,7 @@ function setReply(m) {
 function setAttachment(a) {
   state.attachment = a;
   renderAttachment();
+  renderSuggestions();
 }
 
 function insertAtCursor(text) {
@@ -339,6 +345,17 @@ function pickMention(x) {
 
 async function pickFile(file, forceType) {
   if (!file) return;
+  // 图片先存入媒体库：发送后可以预览，也能收藏为表情
+  if ((forceType === 'image' || !forceType) && /^image\/(png|jpeg|gif|webp)$/.test(file.type)) {
+    try {
+      const m = await uploadImageFile(file);
+      setAttachment({ type: 'image', name: m.name || file.name, size: m.size, mediaId: m.id, preview: m.url });
+      $('#input').focus();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    return;
+  }
   if (file.size > 5 * 1024 * 1024) return toast('直接上传的文件不能超过 5MB；更大的文件请使用“网址”方式发送', 'error');
   let type = forceType;
   if (!type) {
@@ -420,6 +437,7 @@ function bindUi() {
     renderSidebar();
   }));
   $('#btn-send').onclick = sendCurrent;
+  $('#btn-sticker').onclick = (e) => toggleStickerPanel(e.currentTarget);
   $('#btn-image').onclick = () => $('#file-image').click();
   $('#btn-file').onclick = () => $('#file-any').click();
   $('#btn-url-media').onclick = urlMediaDialog;
@@ -440,6 +458,7 @@ function bindUi() {
   input.addEventListener('input', () => {
     handleMentionPopup();
     updateHint();
+    renderSuggestions();
   });
   input.addEventListener('blur', () => setTimeout(() => $('#mention-pop').classList.add('hidden'), 150));
   input.addEventListener('keydown', (e) => {
@@ -460,6 +479,7 @@ function bindUi() {
       $('#mention-pop').classList.add('hidden');
       return;
     }
+    if (!popOpen && handleSuggestKey(e)) return;
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
       sendCurrent();
@@ -498,6 +518,7 @@ Object.assign(actions, {
   loadMore,
   setReply,
   setAttachment,
+  sendImage,
   insertMention,
   recall,
   resend,

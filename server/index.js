@@ -7,6 +7,7 @@ import { ensureAdmin, currentUser } from './auth.js';
 import { router } from './routes.js';
 import { handleWebhook } from './webhook.js';
 import { startAll, stopAll } from './bots.js';
+import { startMediaCleanup } from './media.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -68,8 +69,11 @@ const server = http.createServer(async (req, res) => {
         const origin = req.headers.origin;
         const host = req.headers['x-forwarded-host'] && config.trustProxy ? req.headers['x-forwarded-host'] : req.headers.host;
         if (origin && new URL(origin).host !== host) throw new HttpError(403, '跨站请求被拒绝');
-        if (!String(req.headers['content-type'] || '').includes('application/json') && req.headers['content-length'] !== '0' && req.headers['content-length'])
-          throw new HttpError(415, '需要 JSON 请求');
+        // 非 JSON 请求无法由普通表单跨站提交；原始上传只接受图片类型
+        const ct = String(req.headers['content-type'] || '');
+        const hasBody = req.headers['content-length'] && req.headers['content-length'] !== '0';
+        const ok = route.opts.raw ? /^image\/(png|jpeg|gif|webp)\b/.test(ct) : !hasBody || ct.includes('application/json');
+        if (!ok) throw new HttpError(415, route.opts.raw ? '只支持上传图片' : '需要 JSON 请求');
       }
       const result = await route.handler(req, res, { params: route.params, query: url.searchParams, user });
       if (result !== undefined && !res.headersSent) sendJson(res, 200, result);
@@ -91,6 +95,7 @@ ensureAdmin();
 server.listen(config.port, config.host, () => {
   console.log(`QQ Bot 面板已启动: http://${config.host === '0.0.0.0' ? 'localhost' : config.host}:${config.port}`);
   startAll();
+  startMediaCleanup();
 });
 
 function shutdown() {

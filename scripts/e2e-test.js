@@ -60,7 +60,7 @@ async function step(name, fn) {
 
 try {
   start(['scripts/mock-qq.js'], {});
-  start(['server/index.js'], { DATA_DIR: dataDir, PORT: '3917', HOST: '127.0.0.1', ADMIN_PASSWORD: 'adminpass123' });
+  start(['server/index.js'], { DATA_DIR: dataDir, PORT: '3917', HOST: '127.0.0.1', MEDIA_HOSTS: '127.0.0.1', ADMIN_PASSWORD: 'adminpass123' });
   await waitFor(() => fetch(MOCK + '/_mock/sent').then((r) => r.ok), 'mock 启动');
   await waitFor(() => fetch(PANEL + '/').then((r) => r.ok), '面板启动');
 
@@ -165,7 +165,7 @@ try {
 
   await step('发送图片：先上传 file_data 再发 msg_type=7', async () => {
     const r = await call('POST', `/api/bots/${bot.id}/conversations/group/${G}/messages`, {
-      text: '', media: { type: 'image', name: 'a.png', data: Buffer.from('fakepng').toString('base64') },
+      text: '', media: { type: 'image', name: 'a.png', data: 'R0lGODlhBQAHAIAAAP///wAAACH5BAEAAAAALAAAAAAFAAcAAAIGhI+py+0FADs=' },
     });
     assert.equal(r.data.status, 'ok', JSON.stringify(r.data));
     const sent = await mockSent();
@@ -173,6 +173,7 @@ try {
     assert.equal(up.upload.file_type, 1);
     assert.equal(up.upload.srv_send_msg, false);
     assert.equal(up.upload.file_name, 'a.png');
+    assert.ok(up.upload.file_data, '图片应以 file_data 上传');
     const last = sent.filter((s) => s.body).at(-1);
     assert.equal(last.body.msg_type, 7);
     assert.match(last.body.media.file_info, /^FILEINFO_/);
@@ -220,12 +221,108 @@ try {
     assert.equal(r.data.count, 2);
   });
 
+  const G2 = 'GROUP_FULL_2';
+  const msgsOf = async (g) => (await call('GET', `/api/bots/${bot.id}/conversations/group/${g}/messages`)).data;
+  const convOf = async (g) => (await call('GET', `/api/bots/${bot.id}/conversations`)).data.find((c) => c.peerId === g);
+
+  await step('全量模式：收到未 @ 的群消息，图片自动缓存到本地', async () => {
+    await dispatch('GROUP_MESSAGE_CREATE', {
+      id: 'FULL_1', content: '大家看图', group_openid: G2,
+      author: { member_openid: 'MEM_X', username: '路人甲' },
+      attachments: [{ content_type: 'image/png', url: `${MOCK}/img/a.png`, filename: 'a.png' }],
+    });
+    const m = await waitFor(async () => (await msgsOf(G2)).find((x) => x.msgId === 'FULL_1' && x.payload.attachments[0].mediaId), '图片缓存');
+    assert.equal(m.payload.atBot, false);
+    const c = await convOf(G2);
+    assert.equal(c.fullSeen, true);
+    assert.equal(c.atUnread, false);
+    const img = await fetch(`${PANEL}/api/media/${m.payload.attachments[0].mediaId}`, { headers: { Cookie: cookie } });
+    assert.equal(img.headers.get('content-type'), 'image/png');
+    assert.equal((await img.arrayBuffer()).byteLength > 50, true);
+  });
+
+  await step('@机器人 的消息标记 [有人@我]，被动回复优先使用 @ 消息', async () => {
+    await dispatch('GROUP_AT_MESSAGE_CREATE', { id: 'AT_2', content: ' 在吗', group_openid: G2, author: { member_openid: 'MEM_X', username: '路人甲' } });
+    await dispatch('GROUP_MESSAGE_CREATE', { id: 'FULL_3', content: '闲聊', group_openid: G2, author: { member_openid: 'MEM_Y', username: '路人乙' } });
+    await waitFor(async () => (await msgsOf(G2)).some((x) => x.msgId === 'FULL_3'), '全量消息');
+    assert.equal((await convOf(G2)).atUnread, true);
+    const r = await call('POST', `/api/bots/${bot.id}/conversations/group/${G2}/messages`, { text: '在的' });
+    assert.equal(r.data.payload.sendMode, 'passive');
+    assert.equal((await mockSent()).filter((s) => s.body).at(-1).body.msg_id, 'AT_2');
+    await call('PATCH', `/api/bots/${bot.id}/conversations/group/${G2}`, { read: true });
+    assert.equal((await convOf(G2)).atUnread, false);
+  });
+
+  await step('被动回复过期后自动改用主动消息，并不再重试该 msg_id', async () => {
+    await dispatch('GROUP_AT_MESSAGE_CREATE', { id: 'EXPIRED', content: ' 旧消息', group_openid: 'GROUP_EXP', author: { member_openid: 'M1' } });
+    await waitFor(async () => (await msgsOf('GROUP_EXP')).length, '过期测试消息');
+    const r = await call('POST', `/api/bots/${bot.id}/conversations/group/GROUP_EXP/messages`, { text: '回复' });
+    assert.equal(r.data.payload.sendMode, 'active');
+    assert.equal((await convOf('GROUP_EXP')).replyWindow, null, '过期的 msg_id 不应再作为被动窗口');
+  });
+
+  let mediaId;
+  await step('上传图片到媒体库：只接受真实图片', async () => {
+    const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAADCAYAAAC56t6BAAAAEklEQVR4nGP4z8DwnwEIGJAZAEXyBPxZhbwFAAAAAElFTkSuQmCC', 'base64');
+    const up = (body, type) => fetch(`${PANEL}/api/media`, { method: 'POST', headers: { Cookie: cookie, Origin: PANEL, 'Content-Type': type, 'X-File-Name': 'kun.png' }, body });
+    let r = await up(png, 'image/png');
+    assert.equal(r.status, 200);
+    const m = await r.json();
+    assert.deepEqual([m.width, m.height, m.mime], [2, 3, 'image/png']);
+    mediaId = m.id;
+    assert.equal((await up(png, 'image/png').then((x) => x.json())).id, mediaId, '相同图片去重');
+    assert.equal((await up(Buffer.from('not an image at all'), 'image/png')).status, 415);
+    assert.equal((await up(png, 'text/plain')).status, 415);
+  });
+
+  let sticker;
+  await step('收藏表情、设置关键词、重复收藏不新增', async () => {
+    const r = await call('POST', '/api/stickers', { mediaId });
+    assert.equal(r.status, 200);
+    sticker = r.data;
+    assert.equal((await call('POST', '/api/stickers', { mediaId })).data.existed, true);
+    const p = await call('PATCH', `/api/stickers/${sticker.id}`, { keywords: '哈哈，笑死  开心' });
+    assert.equal(p.data.keywords, '哈哈 笑死 开心');
+    assert.equal((await call('GET', '/api/stickers')).data.length, 1);
+  });
+
+  await step('发送收藏的表情：上传 file_data，同一会话第二次复用 file_info', async () => {
+    const before = (await mockSent()).filter((s) => s.upload).length;
+    const r1 = await call('POST', `/api/bots/${bot.id}/conversations/group/${G2}/messages`, { stickerId: sticker.id, replyMode: 'active' });
+    assert.equal(r1.data.status, 'ok', JSON.stringify(r1.data));
+    assert.equal(r1.data.payload.media.mediaId, mediaId);
+    const sent = await mockSent();
+    const up = sent.filter((s) => s.upload).at(-1);
+    assert.equal(up.upload.file_type, 1);
+    assert.match(up.upload.file_name, /\.png$/);
+    assert.equal(sent.filter((s) => s.body).at(-1).body.msg_type, 7);
+    await call('POST', `/api/bots/${bot.id}/conversations/group/${G2}/messages`, { stickerId: sticker.id, replyMode: 'active' });
+    assert.equal((await mockSent()).filter((s) => s.upload).length, before + 1, '第二次发送不应重新上传');
+    assert.equal((await call('GET', '/api/stickers')).data[0].useCount, 2);
+  });
+
+  await step('删除表情', async () => {
+    assert.equal((await call('DELETE', `/api/stickers/${sticker.id}`)).status, 200);
+    assert.equal((await call('GET', '/api/stickers')).data.length, 0);
+  });
+
   await step('连接被踢 (4009) 后自动 Resume 恢复在线', async () => {
     await fetch(MOCK + '/_mock/kick');
     await waitFor(async () => (await call('GET', `/api/bots/${bot.id}`)).data.status !== 'online', '掉线', 3000).catch(() => {});
     await waitFor(async () => (await call('GET', `/api/bots/${bot.id}`)).data.status === 'online', '恢复在线', 10000);
     const logs = (await call('GET', `/api/bots/${bot.id}/logs`)).data;
     assert.ok(logs.some((l) => l.text.includes('会话已恢复')), '应通过 RESUME 恢复');
+  });
+
+  await step('订阅了未开通的事件 (4014) 时自动退回基础订阅并上线', async () => {
+    await fetch(`${MOCK}/_mock/deny-intent?bits=${1 << 24}`);
+    await call('POST', `/api/bots/${bot.id}/restart`);
+    const b = await waitFor(async () => {
+      const x = (await call('GET', `/api/bots/${bot.id}`)).data;
+      return x.status === 'online' && x.intents === 1 << 25 && x;
+    }, '降级后上线', 10000);
+    assert.equal(b.intents, 1 << 25);
+    await fetch(`${MOCK}/_mock/deny-intent?bits=0`);
   });
 
   await step('Webhook 回调地址验证 (op 13) 签名正确', async () => {
@@ -260,7 +357,7 @@ try {
     const panel = procs[1];
     panel.kill();
     await new Promise((r) => panel.on('exit', r));
-    start(['server/index.js'], { DATA_DIR: dataDir, PORT: '3917', HOST: '127.0.0.1' });
+    start(['server/index.js'], { DATA_DIR: dataDir, PORT: '3917', HOST: '127.0.0.1', MEDIA_HOSTS: '127.0.0.1' });
     await waitFor(() => fetch(PANEL + '/').then((r) => r.ok), '面板重启');
     await waitFor(async () => (await call('GET', `/api/bots/${bot.id}`)).data?.status === 'online', '重启后上线');
     const convs = (await call('GET', `/api/bots/${bot.id}/conversations`)).data;

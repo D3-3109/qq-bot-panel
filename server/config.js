@@ -30,5 +30,13 @@ export const config = {
   adminPassword: process.env.ADMIN_PASSWORD || '',
   defaultApiBase: process.env.QQ_API_BASE || 'https://api.bot.qq.com',
   sessionTtlMs: 30 * 24 * 3600 * 1000,
+  mediaDir: path.join(dataDir, 'media'),
+  cacheRemoteMedia: process.env.MEDIA_CACHE !== '0',
+  mediaRetentionDays: Number(process.env.MEDIA_RETENTION_DAYS || 30),
+  // 允许下载缓存图片的域名（后缀匹配）
+  mediaHosts: (process.env.MEDIA_HOSTS || 'qq.com,qq.com.cn,qpic.cn,qlogo.cn,gtimg.cn,myqcloud.com')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean),
   masterKey: loadMasterKey(),
 };

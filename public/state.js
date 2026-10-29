@@ -13,6 +13,7 @@ export const state = {
   replyTo: null,
   attachment: null,
   panelOpen: localStorage.getItem('panelOpen') !== '0',
+  stickers: [],
 };
 
 // 模块间回调，由 app.js 注册，避免循环依赖

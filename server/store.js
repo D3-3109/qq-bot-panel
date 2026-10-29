@@ -67,6 +67,8 @@ export function convRow(r, displayName) {
     lastTs: r.last_ts,
     lastPreview: r.last_preview,
     unread: r.unread,
+    atUnread: !!r.at_unread,
+    fullSeen: !!r.full_seen,
     hidden: !!r.hidden,
   };
 }
@@ -241,10 +243,13 @@ export function findReplySource(botId, type, peerId, { msgRowId } = {}) {
       return { kind: 'msg', row: m, remaining: rule.max - m.reply_used, expiresAt: m.ts + rule.windowMs };
     }
   }
+  // 全量模式下优先使用 @机器人 的消息，其次是最近的普通消息
   const m = db
     .prepare(
       `SELECT * FROM messages WHERE bot_id = ? AND conv_type = ? AND peer_id = ? AND direction = 'in'
-         AND msg_id IS NOT NULL AND ts > ? AND reply_used < ? ORDER BY id DESC LIMIT 1`,
+         AND msg_id IS NOT NULL AND ts > ? AND reply_used < ?
+       ORDER BY (json_extract(payload, '$.eventType') = 'GROUP_MESSAGE_CREATE'
+                 AND COALESCE(json_extract(payload, '$.atBot'), 0) = 0) ASC, id DESC LIMIT 1`,
     )
     .get(botId, type, peerId, now - rule.windowMs, rule.max);
   if (m) return { kind: 'msg', row: m, remaining: rule.max - m.reply_used, expiresAt: m.ts + rule.windowMs };
@@ -274,6 +279,12 @@ export function consumeReply(src) {
 export function markReplyUsed(src) {
   const table = src.kind === 'msg' ? 'messages' : 'events';
   db.prepare(`UPDATE ${table} SET reply_used = reply_used + 1 WHERE id = ?`).run(src.row.id);
+}
+
+// 被动回复被平台拒绝后，不再用这条消息/事件尝试被动回复
+export function exhaustReply(src) {
+  const table = src.kind === 'msg' ? 'messages' : 'events';
+  db.prepare(`UPDATE ${table} SET reply_used = 99 WHERE id = ?`).run(src.row.id);
 }
 
 export function insertEvent(e) {
