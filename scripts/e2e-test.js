@@ -5,6 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { ed25519KeysFromSecret, ed25519Sign } from '../server/crypto.js';
+import http from 'node:http';
+import crypto from 'node:crypto';
+import { hotp, base32Decode, currentStep } from '../server/totp.js';
 
 const MOCK = 'http://127.0.0.1:9100';
 const PANEL = 'http://127.0.0.1:3917';
@@ -60,7 +63,7 @@ async function step(name, fn) {
 
 try {
   start(['scripts/mock-qq.js'], {});
-  start(['server/index.js'], { DATA_DIR: dataDir, PORT: '3917', HOST: '127.0.0.1', MEDIA_HOSTS: '127.0.0.1', ADMIN_PASSWORD: 'adminpass123' });
+  start(['server/index.js'], { DATA_DIR: dataDir, PORT: '3917', HOST: '127.0.0.1', MEDIA_HOSTS: '127.0.0.1', SCHEDULE_TICK_MS: '500', ADMIN_PASSWORD: 'adminpass123' });
   await waitFor(() => fetch(MOCK + '/_mock/sent').then((r) => r.ok), 'mock 启动');
   await waitFor(() => fetch(PANEL + '/').then((r) => r.ok), '面板启动');
 
@@ -306,6 +309,173 @@ try {
     assert.equal((await call('GET', '/api/stickers')).data.length, 0);
   });
 
+  const lastBody = async () => (await mockSent()).filter((s) => s.body).at(-1).body;
+  const send = (g, body) => call('POST', `/api/bots/${bot.id}/conversations/group/${g}/messages`, body);
+
+  await step('消息搜索：3 字以上走全文索引，短词退回模糊匹配，可按消息定位', async () => {
+    const hits = (await call('GET', `/api/bots/${bot.id}/search?q=${encodeURIComponent('你好机器人')}`)).data;
+    assert.ok(hits.some((m) => m.msgId === 'MSG_IN_1'));
+    const short = (await call('GET', `/api/bots/${bot.id}/search?q=${encodeURIComponent('主动')}`)).data;
+    assert.ok(short.some((m) => m.content === '主动'));
+    assert.equal((await call('GET', `/api/bots/${bot.id}/search?q=${encodeURIComponent('"注入 OR')}`)).status, 200);
+    const target = hits.find((m) => m.msgId === 'MSG_IN_1');
+    const around = (await call('GET', `/api/bots/${bot.id}/conversations/group/${G}/messages?around=${target.id}&limit=10`)).data;
+    assert.ok(around.some((m) => m.id === target.id));
+  });
+
+  await step('主动消息配额：统计当天已发的主动消息', async () => {
+    const c = await convOf(G);
+    assert.ok(c.quota.day >= 1, JSON.stringify(c.quota));
+    assert.equal(c.quota.perDay, 1000);
+    assert.equal(c.quota.perMinute, 20);
+  });
+
+  await step('常用语：新建、修改、删除', async () => {
+    const q = (await call('POST', '/api/quick-replies', { text: '欢迎新朋友！', keywords: '欢迎，新人' })).data;
+    assert.equal(q.keywords, '欢迎 新人');
+    assert.equal((await call('PATCH', `/api/quick-replies/${q.id}`, { text: '欢迎欢迎', keywords: '欢迎', markdown: true })).data.markdown, true);
+    assert.equal((await call('POST', '/api/quick-replies', { text: '   ' })).status, 400);
+    assert.equal((await call('GET', '/api/quick-replies')).data.length, 1);
+    await call('DELETE', `/api/quick-replies/${q.id}`);
+    assert.equal((await call('GET', '/api/quick-replies')).data.length, 0);
+  });
+
+  await step('图文卡片：msg_type=8，链接必须是 https', async () => {
+    const card = { title: '活动通知', description: '周六晚上 8 点开黑', url: 'https://example.com/a', pic_url: 'https://example.com/a.png' };
+    const r = await send(G, { card, replyMode: 'active' });
+    assert.equal(r.data.status, 'ok', JSON.stringify(r.data));
+    const b = await lastBody();
+    assert.equal(b.msg_type, 8);
+    assert.deepEqual(b.card, { type: 'tuwen', content: card });
+    assert.equal((await send(G, { card: { ...card, url: 'http://example.com' } })).status, 400);
+  });
+
+  await step('消息按钮：挂在 Markdown 消息上', async () => {
+    const r = await send(G, { text: '请选择', keyboard: { rows: [[{ label: '签到', type: 2, data: '/签到' }, { label: '官网', type: 0, data: 'https://example.com' }]] }, replyMode: 'active' });
+    assert.equal(r.data.status, 'ok', JSON.stringify(r.data));
+    const b = await lastBody();
+    assert.equal(b.msg_type, 2);
+    const btns = b.keyboard.content.rows[0].buttons;
+    assert.equal(btns[0].render_data.label, '签到');
+    assert.equal(btns[0].action.type, 2);
+    assert.equal(btns[1].action.data, 'https://example.com');
+    assert.equal((await send(G, { text: 'x', keyboard: { rows: [[{ label: '这个按钮的文字太长了超过十个字', type: 2, data: 'a' }]] } })).status, 400);
+  });
+
+  await step('按钮回调：自动回应平台并在会话里显示', async () => {
+    await dispatch('INTERACTION_CREATE', {
+      id: 'INT_1', type: 11, scene: 'group', group_openid: G, group_member_openid: 'MEMBER_A',
+      data: { type: 11, resolved: { button_data: '/签到', button_id: 'b0_0' } },
+    });
+    const ack = await waitFor(async () => (await mockSent()).find((s) => s.interaction === 'INT_1'), '回应按钮回调');
+    assert.deepEqual(ack.body, { code: 0 });
+    await waitFor(async () => (await msgsOf(G)).some((m) => m.direction === 'system' && m.content.includes('点击了按钮「/签到」')), '按钮系统消息');
+  });
+
+  await step('关键词自动回复：只回复 @机器人 的消息，并替换 {name}', async () => {
+    const rule = (await call('POST', `/api/bots/${bot.id}/rules`, { name: '天气', matchType: 'contains', pattern: '天气|下雨', replyText: '{name}，今天晴', cooldownSec: 0 })).data;
+    assert.equal(rule.requireAt, true);
+    assert.equal((await call('POST', `/api/bots/${bot.id}/rules`, { matchType: 'regex', pattern: '([', replyText: 'x' })).status, 400);
+    await dispatch('GROUP_MESSAGE_CREATE', { id: 'AR_0', content: '天气如何', group_openid: G, author: { member_openid: 'M_LU', username: '路人' } });
+    await dispatch('GROUP_AT_MESSAGE_CREATE', { id: 'AR_1', content: ' 天气如何', group_openid: G, author: { member_openid: 'MEMBER_A', username: '小红' } });
+    const reply = await waitFor(async () => (await mockSent()).find((s) => s.body?.msg_id === 'AR_1'), '自动回复');
+    assert.equal(reply.body.content, '小红，今天晴');
+    // 其他机器人 @ 本机器人时不触发规则，避免两个机器人互相回复
+    await dispatch('GROUP_AT_MESSAGE_CREATE', { id: 'AR_BOT', content: ' 天气如何', group_openid: G, author: { member_openid: 'OTHER_BOT', username: '别的机器人', bot: true } });
+    await waitFor(async () => (await msgsOf(G)).some((m) => m.msgId === 'AR_BOT'), '机器人消息入库');
+    await sleep(500);
+    assert.ok(!(await mockSent()).some((s) => s.body?.msg_id === 'AR_BOT'), '机器人的消息不应触发自动回复');
+    assert.ok(!(await mockSent()).some((s) => s.body?.msg_id === 'AR_0'), '未 @ 的消息不应触发');
+    const out = (await msgsOf(G)).filter((m) => m.direction === 'out').at(-1);
+    assert.equal(out.payload.origin, 'auto');
+    assert.equal(out.payload.sendMode, 'passive');
+    assert.equal((await call('GET', `/api/bots/${bot.id}/rules`)).data[0].hits, 1);
+    await call('DELETE', `/api/bots/${bot.id}/rules/${rule.id}`);
+  });
+
+  await step('转发到外部程序：带 HMAC 签名，外部程序的回复以被动回复发出', async () => {
+    const got = [];
+    const hook = http.createServer((req, res) => {
+      const chunks = [];
+      req.on('data', (c) => chunks.push(c));
+      req.on('end', () => {
+        const raw = Buffer.concat(chunks).toString();
+        got.push({ headers: req.headers, raw, body: JSON.parse(raw) });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ reply: '外部程序收到' }));
+      });
+    });
+    await new Promise((r) => hook.listen(9201, '127.0.0.1', r));
+    try {
+      const f = await call('PUT', `/api/bots/${bot.id}/forward`, { url: 'http://127.0.0.1:9201/hook', secret: 's3cret', mode: 'at' });
+      assert.equal(f.data.hasSecret, true);
+      assert.equal((await call('POST', `/api/bots/${bot.id}/forward/test`)).data.reply.text, '外部程序收到');
+      await dispatch('C2C_MESSAGE_CREATE', { id: 'FW_1', content: '帮我查一下', author: { id: 'USER_2', user_openid: 'USER_2' } });
+      const reply = await waitFor(async () => (await mockSent()).find((s) => s.body?.msg_id === 'FW_1'), '转发回复');
+      assert.equal(reply.body.content, '外部程序收到');
+      const req = got.find((g) => g.body.type === 'message');
+      assert.equal(req.body.message.text, '帮我查一下');
+      const sig = crypto.createHmac('sha256', 's3cret').update(`${req.headers['x-panel-timestamp']}.${req.raw}`).digest('hex');
+      assert.equal(req.headers['x-panel-signature'], `sha256=${sig}`);
+    } finally {
+      await call('PUT', `/api/bots/${bot.id}/forward`, { url: '' });
+      hook.close();
+    }
+  });
+
+  await step('定时消息：到点自动发送并记录结果', async () => {
+    const s = (await call('POST', `/api/bots/${bot.id}/schedules`, { convType: 'group', peerId: G, text: '定时测试消息', kind: 'once', runAt: Date.now() + 1200 })).data;
+    assert.ok(s.nextRun > Date.now());
+    await waitFor(async () => (await mockSent()).some((x) => x.body?.content === '定时测试消息'), '定时发送');
+    const done = await waitFor(async () => (await call('GET', `/api/bots/${bot.id}/schedules`)).data.find((x) => x.id === s.id && x.lastStatus), '定时状态');
+    assert.equal(done.lastStatus, '已发送');
+    assert.equal(done.enabled, false);
+    assert.equal((await call('POST', `/api/bots/${bot.id}/schedules`, { convType: 'group', peerId: G, text: 'x', kind: 'daily', timeOfDay: '25:00' })).status, 400);
+    assert.equal((await call('POST', `/api/bots/${bot.id}/schedules`, { convType: 'group', peerId: G, text: 'x', kind: 'once', runAt: Date.now() - 1000 })).status, 400);
+  });
+
+  await step('两步验证：开启后登录需要验证码，恢复码只能用一次', async () => {
+    const { secret } = (await call('POST', '/api/2fa/setup')).data;
+    assert.equal((await call('POST', '/api/2fa/enable', { code: '000000' })).status, 400);
+    const en = await call('POST', '/api/2fa/enable', { code: hotp(base32Decode(secret), currentStep()) });
+    assert.equal(en.data.recoveryCodes.length, 8);
+    const [rc1, rc2] = en.data.recoveryCodes;
+    await call('POST', '/api/logout');
+    const noCode = await call('POST', '/api/login', { username: 'admin', password: 'adminpass123' });
+    assert.equal(noCode.status, 401);
+    assert.equal(noCode.data.need2fa, true);
+    assert.equal((await call('POST', '/api/login', { username: 'admin', password: 'adminpass123', code: '123456' })).status, 401);
+    assert.equal((await call('POST', '/api/login', { username: 'admin', password: 'adminpass123', code: rc1 })).status, 200);
+    assert.equal((await call('GET', '/api/2fa')).data.recoveryLeft, 7);
+    assert.equal((await call('POST', '/api/2fa/disable', { password: 'adminpass123', code: rc1 })).status, 400, '恢复码不能重复使用');
+    assert.equal((await call('POST', '/api/2fa/disable', { password: 'adminpass123', code: rc2 })).status, 200);
+    assert.equal((await call('GET', '/api/2fa')).data.enabled, false);
+  });
+
+  await step('备份下载为 zip，聊天记录可导出 TXT / JSON', async () => {
+    const r = await fetch(`${PANEL}/api/backup?media=1`, { headers: { Cookie: cookie } });
+    const buf = Buffer.from(await r.arrayBuffer());
+    assert.equal(r.headers.get('content-type'), 'application/zip');
+    assert.equal(buf.subarray(0, 2).toString(), 'PK');
+    assert.ok(buf.includes(Buffer.from('panel.db')) && buf.includes(Buffer.from('secret.key')));
+    const txt = await (await fetch(`${PANEL}/api/bots/${bot.id}/conversations/group/${G}/export?format=txt`, { headers: { Cookie: cookie } })).text();
+    assert.ok(txt.includes('你好机器人'));
+    const json = await (await fetch(`${PANEL}/api/bots/${bot.id}/conversations/group/${G}/export?format=json`, { headers: { Cookie: cookie } })).json();
+    assert.ok(json.messages.length > 5);
+  });
+
+  await step('推送订阅：公钥、登记与取消', async () => {
+    const { publicKey } = (await call('GET', '/api/push')).data;
+    assert.equal(Buffer.from(publicKey, 'base64url').length, 65);
+    const p256dh = crypto.createECDH('prime256v1');
+    p256dh.generateKeys();
+    const sub = { endpoint: 'https://push.example.invalid/abc', keys: { p256dh: p256dh.getPublicKey().toString('base64url'), auth: crypto.randomBytes(16).toString('base64url') } };
+    assert.equal((await call('POST', '/api/push/subscribe', { ...sub, endpoint: 'http://insecure' })).status, 400);
+    assert.equal((await call('POST', '/api/push/subscribe', sub)).data.count, 1);
+    await call('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint });
+    assert.equal((await call('GET', '/api/push')).data.count, 0);
+  });
+
   await step('连接被踢 (4009) 后自动 Resume 恢复在线', async () => {
     await fetch(MOCK + '/_mock/kick');
     await waitFor(async () => (await call('GET', `/api/bots/${bot.id}`)).data.status !== 'online', '掉线', 3000).catch(() => {});
@@ -357,7 +527,7 @@ try {
     const panel = procs[1];
     panel.kill();
     await new Promise((r) => panel.on('exit', r));
-    start(['server/index.js'], { DATA_DIR: dataDir, PORT: '3917', HOST: '127.0.0.1', MEDIA_HOSTS: '127.0.0.1' });
+    start(['server/index.js'], { DATA_DIR: dataDir, PORT: '3917', HOST: '127.0.0.1', MEDIA_HOSTS: '127.0.0.1', SCHEDULE_TICK_MS: '500' });
     await waitFor(() => fetch(PANEL + '/').then((r) => r.ok), '面板重启');
     await waitFor(async () => (await call('GET', `/api/bots/${bot.id}`)).data?.status === 'online', '重启后上线');
     const convs = (await call('GET', `/api/bots/${bot.id}/conversations`)).data;

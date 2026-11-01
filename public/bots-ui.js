@@ -1,6 +1,7 @@
 // 机器人账号的添加 / 编辑弹窗、设置弹窗
 import { h, api, toast, openModal, confirmBox } from './lib.js';
 import { state, actions } from './state.js';
+import { qrSvg } from './qr.js';
 
 const INTENT_OPTIONS = [
   { bit: 1 << 25, label: '群聊与私聊事件（GROUP_AND_C2C_EVENT）', hint: '群消息、私聊、机器人进退群等，必选。群主在 QQ 里为机器人开启“接收全部消息”后，群内所有发言都会推送过来', required: true },
@@ -114,24 +115,91 @@ async function restartBot(bot, close) {
   }
 }
 
+// 两步验证：开启时显示二维码，验证一次后展示恢复码
+async function twoFactorSection() {
+  const box = h('div', { class: 'settings-section' }, h('h3', {}, '两步验证'));
+  let status;
+  try {
+    status = await api('GET', '/api/2fa');
+  } catch (e) {
+    box.append(h('p', { class: 'form-error' }, e.message));
+    return box;
+  }
+  const err = h('p', { class: 'form-error' });
+  if (status.enabled) {
+    const pw = h('input', { type: 'password', placeholder: '登录密码', autocomplete: 'current-password' });
+    const code = h('input', { placeholder: '验证码或恢复码', autocomplete: 'one-time-code' });
+    box.append(
+      h('p', { class: 'muted small' }, `已开启。剩余恢复码 ${status.recoveryLeft} 个。`),
+      h('div', { class: 'row-fields' }, pw, code),
+      err,
+      h('button', { class: 'btn danger small', onclick: async () => {
+        try {
+          await api('POST', '/api/2fa/disable', { password: pw.value, code: code.value });
+          toast('已关闭两步验证', 'ok');
+          box.replaceWith(await twoFactorSection());
+        } catch (e) {
+          err.textContent = e.message;
+        }
+      } }, '关闭两步验证'));
+    return box;
+  }
+  box.append(
+    h('p', { class: 'muted small' }, '登录时除了密码，还需要手机验证器 App（如 Google Authenticator、Microsoft Authenticator、1Password）里的 6 位验证码。'),
+    h('button', { class: 'btn small primary', onclick: async () => {
+      try {
+        const { secret, uri } = await api('POST', '/api/2fa/setup');
+        const code = h('input', { placeholder: '输入 App 显示的 6 位验证码', inputmode: 'numeric', autocomplete: 'one-time-code' });
+        box.replaceChildren(
+          h('h3', {}, '两步验证'),
+          h('p', { class: 'small' }, '1. 用验证器 App 扫描二维码：'),
+          h('div', { class: 'qr-box', html: qrSvg(uri, { scale: 4 }) }),
+          h('p', { class: 'small muted' }, '无法扫码时手动输入密钥：'),
+          h('div', { class: 'code-box' }, secret.replace(/(.{4})/g, '$1 ').trim()),
+          h('p', { class: 'small', style: 'margin-top:10px' }, '2. 输入 App 显示的验证码完成开启：'),
+          h('div', { class: 'row-fields' }, code,
+            h('button', { class: 'btn small primary', onclick: async () => {
+              try {
+                const { recoveryCodes } = await api('POST', '/api/2fa/enable', { code: code.value });
+                box.replaceChildren(
+                  h('h3', {}, '两步验证已开启'),
+                  h('p', { class: 'small' }, '请保存下面的恢复码。手机丢失时，每个恢复码可代替验证码登录一次，此后不会再显示：'),
+                  h('div', { class: 'code-box recovery' }, recoveryCodes.join('\n')),
+                  h('button', { class: 'btn small', onclick: () => navigator.clipboard?.writeText(recoveryCodes.join('\n')).then(() => toast('已复制')) }, '复制恢复码'));
+              } catch (e) {
+                err.textContent = e.message;
+              }
+            } }, '验证并开启')),
+          err);
+        code.focus();
+      } catch (e) {
+        err.textContent = e.message;
+      }
+    } }, '开启两步验证'),
+    err);
+  return box;
+}
+
 export function settingsDialog() {
   openModal((m, close) => {
     const oldPw = h('input', { type: 'password', autocomplete: 'current-password' });
     const newPw = h('input', { type: 'password', autocomplete: 'new-password', placeholder: '至少 8 位' });
     const err = h('p', { class: 'form-error' });
+    // 各区块异步加载，先放占位保证显示顺序固定
+    const extra = h('div', {});
+    for (const build of [twoFactorSection, ...settingsSections]) {
+      const slot = h('div', {});
+      extra.append(slot);
+      Promise.resolve(build()).then((s) => s && slot.replaceWith(s));
+    }
     m.append(
       h('h2', {}, '面板设置'),
       h('div', { class: 'field' }, h('label', {}, '当前用户'), h('div', {}, state.username || 'admin')),
       field('原密码', oldPw),
       field('新密码', newPw),
       err,
-      h('div', { class: 'actions' },
-        h('button', { class: 'btn danger', style: 'margin-right:auto', onclick: async () => {
-          await api('POST', '/api/logout');
-          location.reload();
-        } }, '退出登录'),
-        h('button', { class: 'btn', onclick: close }, '关闭'),
-        h('button', { class: 'btn primary', onclick: async () => {
+      h('div', { class: 'actions', style: 'margin-top:0' },
+        h('button', { class: 'btn small primary', onclick: async () => {
           err.textContent = '';
           try {
             await api('POST', '/api/password', { oldPassword: oldPw.value, newPassword: newPw.value });
@@ -141,6 +209,27 @@ export function settingsDialog() {
             err.textContent = e.message;
           }
         } }, '修改密码')),
+      extra,
+      h('div', { class: 'actions' },
+        h('button', { class: 'btn danger', style: 'margin-right:auto', onclick: async () => {
+          await api('POST', '/api/logout');
+          location.reload();
+        } }, '退出登录'),
+        h('button', { class: 'btn', onclick: close }, '关闭')),
     );
   });
 }
+
+// 其他模块（备份、推送通知）向设置弹窗注册的区块
+export const settingsSections = [
+  () => {
+    const media = h('input', { type: 'checkbox', checked: true });
+    return h('div', { class: 'settings-section' },
+      h('h3', {}, '备份'),
+      h('p', { class: 'muted small' }, '下载 zip 压缩包：数据库（账号、聊天记录、表情、设置）和加密密钥，可选包含图片。压缩包里有恢复说明。备份含机器人凭证，请妥善保管。'),
+      h('div', { class: 'checks', style: 'margin-bottom:8px' }, h('label', {}, media, h('span', {}, '包含图片和表情包'))),
+      h('button', { class: 'btn small', onclick: () => {
+        location.href = `/api/backup?media=${media.checked ? 1 : 0}`;
+      } }, '下载备份'));
+  },
+];

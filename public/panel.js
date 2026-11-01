@@ -57,7 +57,12 @@ export function renderPanel() {
   }
   panel.append(body);
 
+  const exportUrl = (fmt) => `/api/bots/${state.botId}/conversations/${conv.type}/${encodeURIComponent(conv.peerId)}/export?format=${fmt}`;
   panel.append(h('div', { class: 'panel-actions' },
+    h('div', { class: 'row-fields' },
+      h('a', { class: 'btn', style: 'flex:1;text-align:center;text-decoration:none;color:inherit', href: exportUrl('txt') }, '导出 TXT'),
+      h('a', { class: 'btn', style: 'flex:1;text-align:center;text-decoration:none;color:inherit', href: exportUrl('json') }, '导出 JSON')),
+    h('button', { class: 'btn', onclick: () => actions.quickSchedule() }, '⏰ 定时发送到这里'),
     h('button', { class: 'btn', onclick: () => actions.hideConv(conv) }, '从列表中移除会话')));
 }
 

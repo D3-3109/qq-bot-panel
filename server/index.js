@@ -3,11 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config } from './config.js';
 import { sendJson, HttpError } from './http.js';
-import { ensureAdmin, currentUser } from './auth.js';
+import { ensureAdmin, currentUser, applyDisable2faEnv } from './auth.js';
 import { router } from './routes.js';
 import { handleWebhook } from './webhook.js';
 import { startAll, stopAll } from './bots.js';
 import { startMediaCleanup } from './media.js';
+import { backfillSearchIndex } from './store.js';
+import { startAutomation } from './automation.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -17,6 +19,7 @@ const MIME = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
   '.json': 'application/json',
+  '.webmanifest': 'application/manifest+json',
 };
 
 const SECURITY_HEADERS = {
@@ -92,10 +95,14 @@ const server = http.createServer(async (req, res) => {
 });
 
 ensureAdmin();
+applyDisable2faEnv();
 server.listen(config.port, config.host, () => {
   console.log(`QQ Bot 面板已启动: http://${config.host === '0.0.0.0' ? 'localhost' : config.host}:${config.port}`);
   startAll();
   startMediaCleanup();
+  startAutomation();
+  const n = backfillSearchIndex();
+  if (n) console.log(`已为 ${n} 条历史消息建立搜索索引`);
 });
 
 function shutdown() {

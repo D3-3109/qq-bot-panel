@@ -1,6 +1,7 @@
 import { h, $, avatar, fmtTime, api, toast } from './lib.js';
 import { state, actions, currentBot, currentConv, nameOf } from './state.js';
 import { textNode, attachmentNode, arkNode, quotedFromElements, outMediaNode, plainPreview } from './render.js';
+import { cardNode, keyboardNode } from './rich-ui.js';
 
 const ROLE_TEXT = { owner: '群主', admin: '管理员' };
 
@@ -79,9 +80,12 @@ export function renderWindowBar() {
   const w = conv.replyWindow;
   const mode = $('#opt-mode').value;
   bar.className = 'window-bar';
+  const q = conv.quota;
+  const quotaText = q ? `主动消息配额：今日 ${q.day}/${q.perDay}，近 1 分钟 ${q.minute}/${q.perMinute}` : '';
+  const quotaLow = q && (q.minute >= q.perMinute - 2 || q.day >= q.perDay * 0.9);
   if (mode === 'active') {
-    bar.classList.add('active');
-    bar.textContent = '将以主动消息发送（占用主动消息配额，群聊约 20 条/分钟，可能被对方关闭）';
+    bar.classList.add(quotaLow ? 'blocked' : 'active');
+    bar.textContent = `将以主动消息发送 · ${quotaText}${quotaLow ? '（即将达到上限）' : ''}`;
     return;
   }
   if (w && w.expiresAt > Date.now()) {
@@ -94,10 +98,10 @@ export function renderWindowBar() {
     bar.classList.add('blocked');
     bar.textContent = '当前没有可用的被动回复窗口：需要有人 @机器人 或私聊后才能回复';
   } else {
-    bar.classList.add('active');
+    bar.classList.add(quotaLow ? 'blocked' : 'active');
     bar.textContent = conv.status === 'rejected'
       ? '无被动回复窗口，且对方已关闭主动消息，发送可能失败'
-      : '无被动回复窗口，将以主动消息发送';
+      : `无被动回复窗口，将以主动消息发送 · ${quotaText}${quotaLow ? '（即将达到上限）' : ''}`;
   }
 }
 
@@ -106,7 +110,7 @@ function msgNode(m, prev) {
   if (!prev || m.ts - prev.ts > 5 * 60_000) frag.append(h('div', { class: 'time-divider' }, fmtTime(m.ts, false)));
 
   if (m.direction === 'system') {
-    frag.append(h('div', { class: 'sys-msg', title: fmtTime(m.ts, true) }, m.content));
+    frag.append(h('div', { class: 'sys-msg', title: fmtTime(m.ts, true), dataset: { id: m.id } }, m.content));
     return frag;
   }
   const out = m.direction === 'out';
@@ -125,12 +129,14 @@ function msgNode(m, prev) {
     (p.attachments || []).forEach((a, idx) => bubble.append(attachmentNode(a, (info) => showLightbox({ ...info, msg: m, idx }))));
     if (p.arkData) bubble.append(arkNode(p.arkData));
     if (out && p.media) bubble.append(outMediaNode(p.media, showLightbox));
+    if (out && p.card) bubble.append(cardNode(p.card));
+    if (out && p.keyboard) bubble.append(keyboardNode(p.keyboard));
     if (!bubble.childNodes.length) {
       bubble.append(p.atBot ? h('span', { class: 'mention' }, `@${bot?.name || '机器人'}`) : h('span', { class: 'muted' }, '[不支持的消息类型]'));
     }
     // 只有图片（表情包）时像 QQ 一样不套气泡
     const kids = [...bubble.children];
-    if (kids.length && kids.every((k) => k.tagName === 'IMG')) bubble.classList.add('media-only');
+    if (kids.length && kids.every((k) => k.tagName === 'IMG' || k.classList.contains('card-msg'))) bubble.classList.add('media-only');
   }
 
   const meta = h('div', { class: 'msg-meta' });
@@ -139,6 +145,8 @@ function msgNode(m, prev) {
     else if (m.status === 'failed') meta.append(h('span', { class: 'fail', title: m.error }, `发送失败：${m.error}`));
     else if (m.status === 'audit') meta.append(h('span', { style: 'color:#d25f00' }, '审核中'));
     else if (m.payload?.sendMode) meta.append(m.payload.sendMode === 'passive' ? '被动回复' : '主动消息');
+    const ORIGIN = { schedule: '⏰ 定时', auto: '🤖 自动回复', forward: '🔗 外部程序' };
+    if (ORIGIN[m.payload?.origin]) meta.append(h('span', { class: 'tag' }, ORIGIN[m.payload.origin]));
   } else if (m.payload?.atBot) {
     meta.append(h('span', { class: 'tag admin' }, '@机器人'));
   }
@@ -197,6 +205,7 @@ export function renderMessages({ keepScroll = false, toBottom = false } = {}) {
     box.append(msgNode(m, prev));
     prev = m;
   }
+  if (state.atLatest === false) box.append(h('button', { class: 'load-more', onclick: () => actions.jumpToLatest() }, '回到最新消息 ↓'));
   if (keepScroll) box.scrollTop = box.scrollHeight - prevHeight + prevTop;
   else if (toBottom || nearBottom) {
     const stick = () => (box.scrollTop = box.scrollHeight);
@@ -287,11 +296,14 @@ export async function sendCurrent() {
     markdown: $('#opt-markdown').checked,
     replyMode: $('#opt-mode').value,
     quoteId: state.replyTo?.id,
+    keyboard: state.keyboard || undefined,
     media: attachmentBody(state.attachment),
   };
   input.value = '';
+  actions.saveDraft();
   actions.setReply(null);
   actions.setAttachment(null);
+  actions.setKeyboard(null);
   const btn = $('#btn-send');
   btn.disabled = true;
   try {

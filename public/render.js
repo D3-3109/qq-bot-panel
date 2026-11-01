@@ -1,16 +1,37 @@
 // 消息内容渲染：@ 提及、表情、附件、Markdown、卡片
 import { h, esc, renderMarkdown, fmtSize } from './lib.js';
 
-const TOKEN_RE = /<@!?([A-Za-z0-9_\-=]+)>|<qqbot-at-user id="([^"]*)"\s*\/>|<qqbot-at-everyone\s*\/>|@everyone|<faceType=\d+,faceId="?(\d+)"?(?:,ext="([^"]*)")?[^>]*>/g;
+const TOKEN_RE = /<@!?([A-Za-z0-9_\-=]+)>|<qqbot-at-user id="([^"]*)"\s*\/>|<qqbot-at-everyone\s*\/>|@everyone|<@all>|<faceType=(\d+),faceId="?(\d+)"?(?:,ext="([^"]*)")?[^>]*>/g;
 
-function faceName(id, ext) {
+// 经典小黄脸的常见编号，事件里没有带名称时用来兜底
+const FACE_NAMES = {
+  0: '惊讶', 1: '撇嘴', 2: '色', 3: '发呆', 4: '得意', 5: '流泪', 6: '害羞', 7: '闭嘴', 8: '睡', 9: '大哭',
+  10: '尴尬', 11: '发怒', 12: '调皮', 13: '呲牙', 14: '微笑', 15: '难过', 16: '酷', 18: '抓狂', 19: '吐',
+  20: '偷笑', 21: '可爱', 22: '白眼', 23: '傲慢', 24: '饥饿', 25: '困', 26: '惊恐', 27: '流汗', 28: '憨笑',
+  29: '悠闲', 30: '奋斗', 31: '咒骂', 32: '疑问', 33: '嘘', 34: '晕', 36: '衰', 37: '骷髅', 38: '敲打',
+  39: '再见', 41: '发抖', 42: '爱情', 43: '跳跳', 46: '猪头', 49: '拥抱', 53: '蛋糕', 60: '咖啡', 63: '玫瑰',
+  66: '爱心', 67: '心碎', 74: '太阳', 75: '月亮', 76: '赞', 77: '踩', 78: '握手', 79: '胜利', 96: '冷汗',
+  97: '擦汗', 98: '抠鼻', 99: '鼓掌', 101: '坏笑', 104: '哈欠', 105: '鄙视', 106: '委屈', 107: '快哭了',
+  108: '阴险', 111: '可怜', 116: '示爱', 118: '抱拳', 120: '拳头', 122: '爱你', 123: 'NO', 124: 'OK',
+  178: '斜眼笑', 179: 'doge', 180: '惊喜', 182: '笑哭', 212: '托腮', 264: '捂脸', 265: '辣眼睛', 266: '哦哟',
+  267: '头秃', 268: '问号脸', 269: '暗中观察', 270: 'emm', 271: '吃瓜', 272: '呵呵哒', 273: '我酸了',
+  277: '汪汪', 281: '无眼笑', 282: '敬礼', 284: '面无表情', 285: '摸鱼', 287: '哦', 289: '睁眼', 293: '摸锦鲤',
+  294: '期待', 297: '拜谢', 299: '牛啊', 306: '牛气冲天', 307: '喵喵', 311: '打call', 318: '崇拜', 319: '比心',
+  320: '庆祝', 322: '拒绝', 323: '嫌弃', 326: '生气',
+};
+
+// 返回 '' 表示不显示（例如商城大表情，图片会作为附件单独显示）
+function faceName(type, id, ext) {
   if (ext) {
     try {
       const json = JSON.parse(decodeURIComponent(escape(atob(ext))));
-      if (json.text) return `[${json.text.replace(/^\//, '')}]`;
+      const t = String(json.text || '').replace(/^\//, '').trim();
+      if (t && t !== '[?]') return `[${t}]`;
     } catch {}
   }
-  return `[表情${id || ''}]`;
+  if (type === '6') return '';
+  if (type === '1' && FACE_NAMES[id]) return `[${FACE_NAMES[id]}]`;
+  return '[表情]';
 }
 
 function tokenize(content, nameOf) {
@@ -19,8 +40,10 @@ function tokenize(content, nameOf) {
   for (const m of String(content || '').matchAll(TOKEN_RE)) {
     if (m.index > last) out.push({ text: content.slice(last, m.index) });
     if (m[1] || m[2] !== undefined) out.push({ mention: `@${nameOf(m[1] || m[2])}` });
-    else if (m[0].startsWith('<faceType')) out.push({ face: faceName(m[3], m[4]) });
-    else out.push({ mention: '@全体成员' });
+    else if (m[0].startsWith('<faceType')) {
+      const f = faceName(m[3], m[4], m[5]);
+      if (f) out.push({ face: f });
+    } else out.push({ mention: '@全体成员' });
     last = m.index + m[0].length;
   }
   if (last < content.length) out.push({ text: content.slice(last) });

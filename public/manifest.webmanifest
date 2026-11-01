@@ -1,0 +1,13 @@
+{
+  "name": "QQ Bot 面板",
+  "short_name": "QQ Bot",
+  "description": "以机器人身份收发 QQ 群聊与私聊消息",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f2f3f5",
+  "theme_color": "#0099ff",
+  "icons": [
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

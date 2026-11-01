@@ -29,6 +29,8 @@ function pushLog(botId, level, text) {
   console.log(`[${new Date().toISOString()}] ${tag} bot#${botId} ${text}`);
 }
 
+export const botLog = pushLog;
+
 export function getLogs(botId) {
   return logs.get(botId) || [];
 }
@@ -92,6 +94,9 @@ function startRuntime(row) {
         );
       }
       return;
+    }
+    if (type === 'INTERACTION_CREATE' && (d?.type === 11 || d?.type === 12) && d.id) {
+      api.ackInteraction(d.id, 0).catch((e) => log('warn', `回应按钮回调失败：${e.message}`));
     }
     handleDispatch({ id: row.id }, type, d, eventId);
   };

@@ -164,11 +164,13 @@ export class Gateway {
     if (this.stopped) return;
     const code = ev.code;
     // 订阅了未开通的事件：退回到基础的群聊与私聊事件后重连
-    const BASE = 1 << 25;
-    if ((code === 4013 || code === 4014) && this.intents !== BASE) {
-      this.log('warn', `事件订阅 ${this.intents} 未开通 (${code})，已退回仅订阅群聊与私聊事件`);
-      this.intents = BASE;
-      this.onIntentsDowngraded?.(BASE);
+    // 订阅了未开通的事件：平台不告诉是哪一项，按顺序逐个去掉可选订阅后重连
+    const OPTIONAL = [[1 << 26, '互动事件'], [1 << 24, '群成员事件']];
+    const drop = OPTIONAL.find(([b]) => this.intents & b);
+    if ((code === 4013 || code === 4014) && drop) {
+      this.intents &= ~drop[0];
+      this.log('warn', `事件订阅未开通 (${code})，已取消订阅「${drop[1]}」后重连`);
+      this.onIntentsDowngraded?.(this.intents);
       this.sessionId = null;
       this.seq = null;
       this.scheduleReconnect();

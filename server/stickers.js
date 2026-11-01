@@ -68,3 +68,35 @@ export function deleteSticker(id) {
 export function markUsed(id) {
   db.prepare('UPDATE stickers SET use_count = use_count + 1, last_used = ? WHERE id = ?').run(Date.now(), id);
 }
+
+// ---------------- 常用语 ----------------
+function quickOut(r) {
+  return r && { id: r.id, text: r.text, keywords: r.keywords, markdown: !!r.markdown, useCount: r.use_count, lastUsed: r.last_used };
+}
+
+export function listQuick() {
+  return db.prepare('SELECT * FROM quick_replies ORDER BY last_used DESC, id DESC').all().map(quickOut);
+}
+
+export function saveQuick({ id, text, keywords, markdown }) {
+  const t = String(text || '').trim().slice(0, 2000);
+  if (!t) throw new HttpError(400, '内容不能为空');
+  const kw = normKeywords(keywords);
+  if (id) {
+    const r = db.prepare('UPDATE quick_replies SET text = ?, keywords = ?, markdown = ? WHERE id = ?').run(t, kw, markdown ? 1 : 0, id);
+    if (!r.changes) throw new HttpError(404, '常用语不存在');
+    return quickOut(db.prepare('SELECT * FROM quick_replies WHERE id = ?').get(id));
+  }
+  const r = db
+    .prepare('INSERT INTO quick_replies (text, keywords, markdown, created_at) VALUES (?, ?, ?, ?)')
+    .run(t, kw, markdown ? 1 : 0, Date.now());
+  return quickOut(db.prepare('SELECT * FROM quick_replies WHERE id = ?').get(r.lastInsertRowid));
+}
+
+export function deleteQuick(id) {
+  if (!db.prepare('DELETE FROM quick_replies WHERE id = ?').run(id).changes) throw new HttpError(404, '常用语不存在');
+}
+
+export function markQuickUsed(id) {
+  db.prepare('UPDATE quick_replies SET use_count = use_count + 1, last_used = ? WHERE id = ?').run(Date.now(), id);
+}

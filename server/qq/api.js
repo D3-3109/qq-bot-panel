@@ -151,6 +151,11 @@ export class QQApi {
     return this.request('GET', `/v2/groups/${encodeURIComponent(groupId)}/members?cursor=${encodeURIComponent(cursor)}`);
   }
 
+  // 回应按钮回调，否则用户客户端会一直转圈；code: 0 成功 1 失败 2 频繁 3 重复 4 无权限 5 仅管理员
+  ackInteraction(interactionId, code = 0) {
+    return this.request('PUT', `/interactions/${encodeURIComponent(interactionId)}`, { code });
+  }
+
   approveJoin(groupId, memberId, body) {
     return this.request(
       'POST',

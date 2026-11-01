@@ -104,6 +104,10 @@ const server = http.createServer(async (req, res) => {
       next_cursor: '',
     });
   }
+  if ((m = /^\/interactions\/([^/]+)$/.exec(p)) && req.method === 'PUT') {
+    sent.push({ interaction: m[1], body: await body(req) });
+    return json(res, 200, {});
+  }
   if ((m = /^\/v2\/groups\/([^/]+)\/approval_join_request\/([^/]+)$/.exec(p))) {
     sent.push({ approve: await body(req), group: m[1], member: m[2] });
     return json(res, 200, {});

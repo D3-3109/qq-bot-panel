@@ -9,6 +9,9 @@ import fs from 'node:fs';
 import { readBody } from './http.js';
 import * as media from './media.js';
 import * as stickers from './stickers.js';
+import { streamBackup, exportConversation } from './backup.js';
+import * as automation from './automation.js';
+import * as webpush from './webpush.js';
 
 export const router = new Router();
 const r = (method, path, handler, opts) => router.add(method, path, handler, opts);
@@ -32,7 +35,7 @@ const peer = (p) => {
 // ---- 认证 ----
 r('POST', '/api/login', async (req, res) => {
   const body = await readJson(req);
-  return auth.login(req, res, body.username, body.password);
+  return auth.login(req, res, body.username, body.password, body.code);
 }, { public: true });
 
 r('POST', '/api/logout', async (req, res) => {
@@ -46,6 +49,15 @@ r('POST', '/api/password', async (req, res, { user }) => {
   const body = await readJson(req);
   auth.changePassword(user, body.oldPassword, body.newPassword);
   auth.logout(req, res);
+  return { ok: true };
+});
+
+r('GET', '/api/2fa', async (req, res, { user }) => auth.twoFactorStatus(user));
+r('POST', '/api/2fa/setup', async (req, res, { user }) => auth.startTwoFactor(user));
+r('POST', '/api/2fa/enable', async (req, res, { user }) => auth.enableTwoFactor(user, (await readJson(req)).code));
+r('POST', '/api/2fa/disable', async (req, res, { user }) => {
+  const body = await readJson(req);
+  auth.disableTwoFactor(user, body.password, body.code);
   return { ok: true };
 });
 
@@ -99,6 +111,8 @@ r('GET', '/api/bots/:id/conversations/:type/:peer/messages', async (req, res, { 
   const id = botId(params);
   const before = Number(query.get('before')) || undefined;
   const limit = Math.min(200, Number(query.get('limit')) || 50);
+  const around = Number(query.get('around')) || 0;
+  if (around) return store.listMessagesAround(id, convType(params.type), peer(params.peer), around, limit);
   return store.listMessages(id, convType(params.type), peer(params.peer), { before, limit });
 });
 
@@ -113,6 +127,17 @@ r('GET', '/api/bots/:id/conversations/:type/:peer/window', async (req, res, { pa
 
 r('POST', '/api/bots/:id/messages/:mid/recall', async (req, res, { params }) =>
   recallMessage(botId(params), Number(params.mid)));
+
+r('GET', '/api/bots/:id/search', async (req, res, { params, query }) => {
+  const id = botId(params);
+  const t = query.get('type');
+  const p = query.get('peer');
+  return store.searchMessages(id, query.get('q'), {
+    convType: t ? convType(t) : undefined,
+    peerId: p ? peer(p) : undefined,
+    limit: Math.min(100, Number(query.get('limit')) || 50),
+  });
+});
 
 // ---- 群成员 ----
 r('GET', '/api/bots/:id/groups/:peer/members', async (req, res, { params }) =>
@@ -246,3 +271,83 @@ r('DELETE', '/api/stickers/:sid', async (req, res, { params }) => {
   broadcast('stickers', stickers.listStickers());
   return { ok: true };
 });
+
+// ---- 常用语 ----
+r('GET', '/api/quick-replies', async () => stickers.listQuick());
+r('POST', '/api/quick-replies', async (req) => {
+  const q = stickers.saveQuick(await readJson(req));
+  broadcast('quick', stickers.listQuick());
+  return q;
+});
+r('PATCH', '/api/quick-replies/:qid', async (req, res, { params }) => {
+  const q = stickers.saveQuick({ ...(await readJson(req)), id: Number(params.qid) });
+  broadcast('quick', stickers.listQuick());
+  return q;
+});
+r('DELETE', '/api/quick-replies/:qid', async (req, res, { params }) => {
+  stickers.deleteQuick(Number(params.qid));
+  broadcast('quick', stickers.listQuick());
+  return { ok: true };
+});
+r('POST', '/api/quick-replies/:qid/used', async (req, res, { params }) => {
+  stickers.markQuickUsed(Number(params.qid));
+  return { ok: true };
+});
+
+// ---- 备份与导出 ----
+r('GET', '/api/backup', async (req, res, { query }) => {
+  await streamBackup(res, { includeMedia: query.get('media') !== '0' });
+  return undefined;
+});
+
+r('GET', '/api/bots/:id/conversations/:type/:peer/export', async (req, res, { params, query }) => {
+  const id = botId(params);
+  const out = exportConversation(id, convType(params.type), peer(params.peer), query.get('format') === 'json' ? 'json' : 'txt');
+  const body = Buffer.from(out.body, 'utf8');
+  res.writeHead(200, {
+    'Content-Type': out.type,
+    'Content-Length': body.length,
+    'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(out.filename)}`,
+    'Cache-Control': 'no-store',
+  });
+  res.end(body);
+  return undefined;
+});
+
+// ---- 自动化：定时消息、自动回复、转发 ----
+r('GET', '/api/bots/:id/schedules', async (req, res, { params }) => automation.listSchedules(botId(params)));
+r('POST', '/api/bots/:id/schedules', async (req, res, { params }) => automation.saveSchedule(botId(params), await readJson(req)));
+r('PATCH', '/api/bots/:id/schedules/:sid', async (req, res, { params }) =>
+  automation.saveSchedule(botId(params), await readJson(req), Number(params.sid)));
+r('DELETE', '/api/bots/:id/schedules/:sid', async (req, res, { params }) => {
+  automation.deleteSchedule(botId(params), Number(params.sid));
+  return { ok: true };
+});
+
+r('GET', '/api/bots/:id/rules', async (req, res, { params }) => automation.listRules(botId(params)));
+r('POST', '/api/bots/:id/rules', async (req, res, { params }) => automation.saveRule(botId(params), await readJson(req)));
+r('PATCH', '/api/bots/:id/rules/:rid', async (req, res, { params }) =>
+  automation.saveRule(botId(params), await readJson(req), Number(params.rid)));
+r('DELETE', '/api/bots/:id/rules/:rid', async (req, res, { params }) => {
+  automation.deleteRule(botId(params), Number(params.rid));
+  return { ok: true };
+});
+
+r('GET', '/api/bots/:id/forward', async (req, res, { params }) => automation.getForward(botId(params)));
+r('PUT', '/api/bots/:id/forward', async (req, res, { params }) => automation.saveForward(botId(params), await readJson(req)));
+r('POST', '/api/bots/:id/forward/test', async (req, res, { params }) => {
+  try {
+    return await automation.testForward(botId(params));
+  } catch (e) {
+    throw new HttpError(502, `测试失败：${e.message}`);
+  }
+});
+
+// ---- Web Push ----
+r('GET', '/api/push', async () => ({ publicKey: webpush.vapidPublicKey(), count: webpush.countSubscriptions() }));
+r('POST', '/api/push/subscribe', async (req) => webpush.subscribe(await readJson(req), req.headers['user-agent']));
+r('POST', '/api/push/unsubscribe', async (req) => {
+  webpush.unsubscribe((await readJson(req)).endpoint);
+  return { ok: true };
+});
+r('POST', '/api/push/test', async () => webpush.pushAll({ title: 'QQ Bot 面板', body: '这是一条测试通知', test: true }));

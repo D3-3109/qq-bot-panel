@@ -1,5 +1,6 @@
 import { h, $, avatar, fmtTime, api, toast, esc } from './lib.js';
 import { state, actions, currentBot, convKey, STATUS_TEXT, EVENT_TEXT } from './state.js';
+import { plainPreview } from './render.js';
 
 export function renderRail() {
   const box = $('#rail-bots');
@@ -50,8 +51,12 @@ function renderConvs() {
     .filter((c) => !c.hidden)
     .filter((c) => !q || c.name.toLowerCase().includes(q) || c.peerId.toLowerCase().includes(q) || (c.lastPreview || '').toLowerCase().includes(q))
     .sort((a, b) => b.lastTs - a.lastTs);
+  if (q) {
+    renderSearch(body, list, q);
+    return;
+  }
   if (!list.length) {
-    body.append(h('div', { class: 'empty-list', html: q ? '没有匹配的会话' :
+    body.append(h('div', { class: 'empty-list', html:
       '暂无会话<br>把机器人拉进群并 @ 它，或私聊机器人，<br>会话就会出现在这里。<br><br>也可以点击右上角 ＋ 手动添加群 OpenID。' }));
     return;
   }
@@ -140,3 +145,68 @@ function renderLogs() {
 }
 
 export { esc };
+
+// ---------- 搜索：会话名 + 聊天记录 ----------
+let searchSeq = 0;
+let searchTimer = null;
+
+function highlight(text, q) {
+  const frag = document.createDocumentFragment();
+  const lower = text.toLowerCase();
+  const needle = q.toLowerCase();
+  let i = 0;
+  while (needle && i < text.length) {
+    const j = lower.indexOf(needle, i);
+    if (j < 0) break;
+    frag.append(text.slice(i, j), h('mark', {}, text.slice(j, j + needle.length)));
+    i = j + needle.length;
+  }
+  frag.append(text.slice(i));
+  return frag;
+}
+
+function hitText(m) {
+  const t = plainPreview(m.content || '', (id) => id.slice(0, 6));
+  if (t) return t;
+  return m.payload?.attachments?.length || m.payload?.media ? '[图片/文件]' : '';
+}
+
+function renderSearch(body, convs, q) {
+  for (const c of convs.slice(0, 5)) {
+    body.append(h('div', { class: 'conv', onclick: () => actions.openConv(c.type, c.peerId) },
+      avatar(c.name, c.peerId, { square: c.type === 'group' }),
+      h('div', { class: 'meta' }, h('div', { class: 'title' }, highlight(c.name, q)), h('div', { class: 'preview' }, c.lastPreview || ''))));
+  }
+  const box = h('div', {});
+  body.append(h('div', { class: 'search-section' }, '聊天记录'), box);
+  if (state.searchHits && state.searchHits.q === q) drawHits(box, q, state.searchHits.list);
+  else box.append(h('div', { class: 'empty-list' }, '搜索中…'));
+  clearTimeout(searchTimer);
+  if (!state.searchHits || state.searchHits.q !== q) {
+    const seq = ++searchSeq;
+    searchTimer = setTimeout(async () => {
+      try {
+        const list = await api('GET', `/api/bots/${state.botId}/search?q=${encodeURIComponent(q)}&limit=60`);
+        if (seq !== searchSeq) return;
+        state.searchHits = { q, list };
+        if (state.tab === 'chats' && state.search.trim().toLowerCase() === q) renderSidebar();
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }, 250);
+  }
+}
+
+function drawHits(box, q, list) {
+  if (!list.length) {
+    box.append(h('div', { class: 'empty-list' }, '没有找到相关聊天记录'));
+    return;
+  }
+  for (const m of list) {
+    const c = state.convs.get(convKey(m.convType, m.peerId));
+    const who = m.direction === 'out' ? '我' : m.authorName || '成员';
+    box.append(h('div', { class: 'search-hit', onclick: () => actions.openConv(m.convType, m.peerId, { focusId: m.id }) },
+      h('div', { class: 'sh-head' }, h('span', {}, `${c?.name || m.peerId.slice(0, 8)} · ${who}`), h('span', {}, fmtTime(m.ts))),
+      h('div', { class: 'sh-body' }, highlight(hitText(m), q))));
+  }
+}

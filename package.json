@@ -13,7 +13,8 @@
   "scripts": {
     "start": "node server/index.js",
     "mock": "node scripts/mock-qq.js",
-    "test": "node scripts/e2e-test.js"
+    "test": "node scripts/unit-test.js && node scripts/e2e-test.js",
+    "test:unit": "node scripts/unit-test.js"
   },
   "devDependencies": {
     "ws": "^8.18.0"

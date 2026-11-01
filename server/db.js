@@ -143,6 +143,24 @@ function addColumn(table, column, def) {
 }
 addColumn('conversations', 'at_unread', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('conversations', 'full_seen', 'INTEGER NOT NULL DEFAULT 0');
+addColumn('users', 'totp_secret_enc', "TEXT NOT NULL DEFAULT ''");
+addColumn('users', 'totp_last_step', 'INTEGER NOT NULL DEFAULT -1');
+addColumn('users', 'recovery_hashes', "TEXT NOT NULL DEFAULT '[]'");
+
+// 全文搜索：trigram 分词支持中文子串匹配（3 个字及以上）；rowid 即 messages.id
+db.exec(`
+CREATE TABLE IF NOT EXISTS quick_replies (
+  id INTEGER PRIMARY KEY,
+  text TEXT NOT NULL,
+  keywords TEXT NOT NULL DEFAULT '',
+  markdown INTEGER NOT NULL DEFAULT 0,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  last_used INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+`);
+
+db.exec("CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text, author, tokenize = 'trigram')");
 
 export function tx(fn) {
   db.exec('BEGIN');

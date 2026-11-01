@@ -4,6 +4,19 @@ import { broadcast } from './hub.js';
 import { config } from './config.js';
 import { fetchRemoteImage } from './media.js';
 
+// 其他模块（自动回复、转发、推送）注册的回调
+export const messageHooks = [];
+export const eventHooks = [];
+function runHooks(list, ...args) {
+  for (const fn of list) {
+    try {
+      fn(...args);
+    } catch (e) {
+      console.error('hook error', e);
+    }
+  }
+}
+
 function parseExt(scene) {
   const out = {};
   for (const item of scene?.ext || []) {
@@ -27,7 +40,13 @@ function previewOf(content, attachments, messageType) {
     .replace(/<@!?([^>]+)>/g, '@成员')
     .replace(/<qqbot-at-user id="[^"]*"\s*\/>/g, '@成员')
     .replace(/<qqbot-at-everyone\s*\/>/g, '@全体成员')
-    .replace(/<faceType=[^>]*>/g, '[表情]')
+    .replace(/<faceType=(\d+)(?:[^>]*?,ext="([^"]*)")?[^>]*>/g, (_, type, ext) => {
+      try {
+        const t = JSON.parse(Buffer.from(ext || '', 'base64').toString('utf8')).text?.replace(/^\//, '').trim();
+        if (t && t !== '[?]') return `[${t}]`;
+      } catch {}
+      return type === '6' ? '' : '[表情]';
+    })
     .trim();
   if (text) return text.slice(0, 80);
   if (messageType === 3) return '[卡片消息]';
@@ -53,6 +72,11 @@ const SYSTEM_TEXT = {
   FRIEND_DEL: () => '用户删除了机器人',
   C2C_MSG_RECEIVE: () => '用户开启了机器人主动消息',
   C2C_MSG_REJECT: () => '用户关闭了机器人主动消息',
+  INTERACTION_CREATE: (d, n) => {
+    if (d.type !== 11) return '';
+    const who = d.group_member_openid ? n(d.group_member_openid) : '用户';
+    return `${who} 点击了按钮「${d.data?.resolved?.button_data || d.data?.resolved?.button_id || ''}」`;
+  },
 };
 
 const CONV_STATUS = {
@@ -94,6 +118,7 @@ export function handleDispatch(bot, type, d, eventId) {
   const ev = store.insertEvent({ botId, eventId, type, convType, peerId, data: d, ts: Date.now() });
   if (!ev) return; // 重复推送
   broadcast('event', ev);
+  runHooks(eventHooks, botId, ev);
 
   if (!peerId) return;
 
@@ -110,6 +135,10 @@ export function handleDispatch(bot, type, d, eventId) {
   if (textFn) {
     const nameOf = (id) => (id ? store.memberName(botId, peerId, id) : '某成员');
     const text = textFn(d, nameOf);
+    if (!text) {
+      broadcast('conversation', store.upsertConversation(botId, convType, peerId, patch));
+      return;
+    }
     patch.last_preview = `[系统] ${text}`;
     const msg = store.insertMessage({
       botId,
@@ -178,6 +207,7 @@ function handleMessage(bot, type, d, eventId) {
       arkData: d.ark_data || null,
       msgElements: d.msg_elements || [],
       authorUnionOpenid: author.union_openid || '',
+      authorIsBot: !!author.bot,
     },
     refIdx: ext.msg_idx || '',
     quoteIdx: ext.ref_msg_idx || '',
@@ -214,6 +244,7 @@ function handleMessage(bot, type, d, eventId) {
   broadcast('message', msg);
   broadcast('conversation', conv);
   cacheAttachments(msg);
+  runHooks(messageHooks, msg);
 }
 
 // QQ 图片链接有时效，收到后下载到本地媒体库，用于预览和收藏表情

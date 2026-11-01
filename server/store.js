@@ -116,7 +116,24 @@ export function getConversation(botId, type, peerId) {
       .get(botId, peerId);
     display = m?.author_name || '';
   }
-  return { ...convRow(r, display), replyWindow: replyWindow(botId, type, peerId) };
+  return { ...convRow(r, display), replyWindow: replyWindow(botId, type, peerId), quota: activeQuota(botId, type, peerId) };
+}
+
+// 主动消息频控：单个群/用户每分钟 20 条、每天 1000 条
+export const ACTIVE_LIMITS = { perMinute: 20, perDay: 1000 };
+
+export function activeQuota(botId, type, peerId) {
+  const now = Date.now();
+  const dayStart = new Date(now);
+  dayStart.setHours(0, 0, 0, 0);
+  const r = db
+    .prepare(
+      `SELECT COUNT(*) AS day, SUM(CASE WHEN ts > ? THEN 1 ELSE 0 END) AS minute FROM messages
+       WHERE bot_id = ? AND conv_type = ? AND peer_id = ? AND direction = 'out' AND ts >= ?
+         AND status IN ('ok', 'audit', 'recalled') AND json_extract(payload, '$.sendMode') = 'active'`,
+    )
+    .get(now - 60_000, botId, type, peerId, dayStart.getTime());
+  return { day: r.day || 0, minute: r.minute || 0, ...ACTIVE_LIMITS };
 }
 
 export function listConversations(botId) {
@@ -199,7 +216,9 @@ export function insertMessage(m) {
       m.ts || Date.now(),
     );
   if (!r.changes) return null;
-  return msgRow(db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid));
+  const row = msgRow(db.prepare('SELECT * FROM messages WHERE id = ?').get(r.lastInsertRowid));
+  indexMessage(row);
+  return row;
 }
 
 export function findMessageByMsgId(botId, msgId) {
@@ -332,4 +351,96 @@ export function listEvents(botId, { before, limit = 100, type } = {}) {
     .prepare(`SELECT * FROM events WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`)
     .all(...vals, limit)
     .map(eventRow);
+}
+
+// ---------------- 搜索 ----------------
+export function searchText(content) {
+  return String(content || '')
+    .replace(/<qqbot-at-user id="[^"]*"\s*\/>/g, ' ')
+    .replace(/<@!?[^>]+>/g, ' ')
+    .replace(/<qqbot-at-everyone\s*\/>/g, ' ')
+    .replace(/<faceType=[^>]*>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function indexMessage(m) {
+  if (!m || m.direction === 'system' && !m.content) return;
+  db.prepare('INSERT OR REPLACE INTO messages_fts (rowid, text, author) VALUES (?, ?, ?)').run(
+    m.id,
+    searchText(m.content),
+    m.authorName || '',
+  );
+}
+
+// 启动时为尚未建索引的历史消息补建索引
+export function backfillSearchIndex() {
+  const rows = db
+    .prepare('SELECT id, content, author_name FROM messages WHERE id > COALESCE((SELECT MAX(rowid) FROM messages_fts), 0) ORDER BY id')
+    .all();
+  if (!rows.length) return 0;
+  const ins = db.prepare('INSERT OR REPLACE INTO messages_fts (rowid, text, author) VALUES (?, ?, ?)');
+  db.exec('BEGIN');
+  try {
+    for (const r of rows) ins.run(r.id, searchText(r.content), r.author_name || '');
+    db.exec('COMMIT');
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+  return rows.length;
+}
+
+export function searchMessages(botId, query, { convType, peerId, limit = 50 } = {}) {
+  const q = String(query || '').trim().slice(0, 100);
+  if (!q) return [];
+  const filters = ['m.bot_id = ?', "m.direction != 'system'"];
+  const vals = [botId];
+  if (convType && peerId) {
+    filters.push('m.conv_type = ? AND m.peer_id = ?');
+    vals.push(convType, peerId);
+  }
+  let rows;
+  if ([...q].length >= 3) {
+    // 每个词作为短语匹配，避免 FTS 语法注入
+    const terms = q.split(/\s+/).filter(Boolean).map((t) => `"${t.replace(/"/g, '""')}"`);
+    const short = terms.some((t) => [...t].length < 5);
+    if (!short) {
+      rows = db
+        .prepare(
+          `SELECT m.* FROM messages_fts f JOIN messages m ON m.id = f.rowid
+           WHERE messages_fts MATCH ? AND ${filters.join(' AND ')} ORDER BY m.id DESC LIMIT ?`,
+        )
+        .all(terms.join(' AND '), ...vals, limit);
+    }
+  }
+  if (!rows) {
+    // 1~2 个字的关键词 trigram 无法匹配，退回 LIKE 扫描
+    const like = `%${q.replace(/[!%_]/g, (c) => `!${c}`)}%`;
+    rows = db
+      .prepare(
+        `SELECT m.* FROM messages m WHERE ${filters.join(' AND ')}
+         AND (m.content LIKE ? ESCAPE '!' OR m.author_name LIKE ? ESCAPE '!') ORDER BY m.id DESC LIMIT ?`,
+      )
+      .all(...vals, like, like, limit);
+  }
+  return rows.map(msgRow);
+}
+
+export function listMessagesAround(botId, type, peerId, aroundId, limit = 60) {
+  const half = Math.floor(limit / 2);
+  const before = db
+    .prepare('SELECT * FROM messages WHERE bot_id = ? AND conv_type = ? AND peer_id = ? AND id <= ? ORDER BY id DESC LIMIT ?')
+    .all(botId, type, peerId, aroundId, half);
+  const after = db
+    .prepare('SELECT * FROM messages WHERE bot_id = ? AND conv_type = ? AND peer_id = ? AND id > ? ORDER BY id ASC LIMIT ?')
+    .all(botId, type, peerId, aroundId, limit - half);
+  return [...before.reverse(), ...after].map(msgRow);
+}
+
+export function listMessagesAll(botId, type, peerId) {
+  return db
+    .prepare('SELECT * FROM messages WHERE bot_id = ? AND conv_type = ? AND peer_id = ? ORDER BY id')
+    .all(botId, type, peerId)
+    .map(msgRow);
 }

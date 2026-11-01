@@ -6,6 +6,8 @@
   <title>QQ Bot 面板</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="/style.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#0099ff" />
 </head>
 <body>
   <div id="login" class="login hidden">
@@ -14,6 +16,7 @@
       <h1>QQ Bot 面板</h1>
       <input name="username" placeholder="用户名" value="admin" autocomplete="username" />
       <input name="password" type="password" placeholder="密码" autocomplete="current-password" required />
+      <input name="code" class="hidden" placeholder="6 位验证码或恢复码" autocomplete="one-time-code" inputmode="numeric" />
       <button type="submit" class="btn primary block">登录</button>
       <p class="form-error" id="login-error"></p>
     </form>
@@ -24,6 +27,7 @@
       <div class="rail-bots" id="rail-bots"></div>
       <button class="rail-btn" id="btn-add-bot" title="添加机器人账号">＋</button>
       <div class="rail-spacer"></div>
+      <button class="rail-btn" id="btn-automation" title="自动化：定时消息、自动回复、转发">⚡</button>
       <button class="rail-btn" id="btn-settings" title="设置">⚙</button>
     </nav>
 
@@ -61,12 +65,16 @@
         <div class="messages" id="messages"></div>
         <div class="composer">
           <div class="reply-bar hidden" id="reply-bar"></div>
+          <div class="reply-bar hidden" id="keyboard-bar"></div>
           <div class="window-bar" id="window-bar"></div>
           <div class="toolbar">
             <button class="tool" id="btn-sticker" title="收藏的表情">😊 表情</button>
+            <button class="tool" id="btn-quick" title="常用语">💬 常用语</button>
             <button class="tool" id="btn-image" title="发送图片">🖼 图片</button>
             <button class="tool" id="btn-file" title="发送视频/语音/文件">📎 文件</button>
             <button class="tool" id="btn-url-media" title="通过网址发送媒体">🔗 网址</button>
+            <button class="tool" id="btn-card" title="图文卡片">🗂 卡片</button>
+            <button class="tool" id="btn-keyboard" title="消息按钮">🔘 按钮</button>
             <button class="tool" id="btn-at" title="@成员（Markdown）">@ 成员</button>
             <label class="tool toggle"><input type="checkbox" id="opt-markdown" /> Markdown</label>
             <select class="tool" id="opt-mode" title="发送方式">

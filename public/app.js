@@ -4,8 +4,11 @@ import { renderRail, renderBotCard, renderSidebar } from './sidebar.js';
 import { renderChatHead, renderMessages, upsertMessage, renderReplyBar, renderAttachment, renderWindowBar, sendCurrent } from './chat.js';
 import { renderPanel } from './panel.js';
 import { botDialog, settingsDialog } from './bots-ui.js';
+import { automationDialog, quickSchedule } from './automation-ui.js';
+import { cardDialog, keyboardDialog, setKeyboard } from './rich-ui.js';
+import { registerServiceWorker } from './push-ui.js';
 import { sendImage } from './chat.js';
-import { loadStickers, setStickers, toggleStickerPanel, uploadImageFile, renderSuggestions, handleSuggestKey } from './stickers-ui.js';
+import { loadStickers, setStickers, toggleStickerPanel, uploadImageFile, renderSuggestions, handleSuggestKey, loadQuick, setQuick, toggleQuickPanel } from './stickers-ui.js';
 
 // ---------------- 启动 / 登录 ----------------
 async function boot() {
@@ -26,12 +29,18 @@ function showLogin() {
     const f = new FormData(e.target);
     $('#login-error').textContent = '';
     try {
-      const me = await api('POST', '/api/login', { username: f.get('username'), password: f.get('password') });
+      const me = await api('POST', '/api/login', { username: f.get('username'), password: f.get('password'), code: f.get('code') || undefined });
       state.username = me.username;
       $('#login').classList.add('hidden');
       startApp();
     } catch (err) {
       $('#login-error').textContent = err.message;
+      if (err.data?.need2fa) {
+        const code = $('#login-form [name=code]');
+        code.classList.remove('hidden');
+        code.value = '';
+        code.focus();
+      }
     }
   };
   $('#login-form [name=password]').focus();
@@ -42,6 +51,8 @@ async function startApp() {
   bindUi();
   connectStream();
   loadStickers();
+  loadQuick();
+  registerServiceWorker();
   await reloadBots(Number(localStorage.getItem('botId')) || undefined);
 }
 
@@ -72,7 +83,8 @@ function connectStream() {
     const m = JSON.parse(e.data);
     if (m.botId !== state.botId) return;
     if (state.current && m.convType === state.current.type && m.peerId === state.current.peerId) {
-      upsertMessage(m);
+      // 正在查看搜索定位的历史位置时，不把新消息插到中间
+      if (state.atLatest !== false || state.messages.some((x) => x.id === m.id)) upsertMessage(m);
       if (m.direction === 'in' && m.convType === 'group') refreshMembersSoon();
     } else if (m.direction === 'in' && document.visibilityState !== 'visible' && (m.convType === 'c2c' || m.payload?.atBot)) {
       // 全量模式下群消息很多，只对私聊和 @机器人 弹通知
@@ -80,6 +92,7 @@ function connectStream() {
     }
   });
   es.addEventListener('stickers', (e) => setStickers(JSON.parse(e.data)));
+  es.addEventListener('quick', (e) => setQuick(JSON.parse(e.data)));
   es.addEventListener('event', (e) => {
     const ev = JSON.parse(e.data);
     if (ev.botId !== state.botId) return;
@@ -152,12 +165,35 @@ async function selectBot(id, force = false) {
 }
 
 // ---------------- 会话 ----------------
-async function openConv(type, peerId) {
+// ---------------- 草稿：每个会话单独保存，避免把写给 A 群的话发到 B 群 ----------------
+const draftKey = (c) => `draft:${state.botId}:${c.type}:${c.peerId}`;
+function saveDraft() {
+  if (!state.current) return;
+  const v = $('#input').value;
+  if (v.trim()) localStorage.setItem(draftKey(state.current), v);
+  else localStorage.removeItem(draftKey(state.current));
+}
+let draftTimer = null;
+function saveDraftSoon() {
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(saveDraft, 300);
+}
+function loadDraft() {
+  $('#input').value = state.current ? localStorage.getItem(draftKey(state.current)) || '' : '';
+  updateHint();
+  renderSuggestions();
+}
+
+async function openConv(type, peerId, { focusId } = {}) {
+  if (!focusId && state.current && state.current.type === type && state.current.peerId === peerId) return;
+  saveDraft();
   state.tab = 'chats';
   state.current = { type, peerId };
   state.replyTo = null;
   state.attachment = null;
   state.members = [];
+  setKeyboard(null);
+  loadDraft();
   location.hash = `${type}/${peerId}`;
   $('#chat-empty').classList.add('hidden');
   $('#chat-inner').classList.remove('hidden');
@@ -172,14 +208,17 @@ async function openConv(type, peerId) {
     state.convs.set(convKey(type, peerId), conv);
   }
   renderChatHead();
+  const base = `/api/bots/${state.botId}/conversations/${type}/${encodeURIComponent(peerId)}/messages`;
   const [msgs] = await Promise.all([
-    api('GET', `/api/bots/${state.botId}/conversations/${type}/${encodeURIComponent(peerId)}/messages?limit=50`),
+    api('GET', focusId ? `${base}?around=${focusId}&limit=60` : `${base}?limit=50`),
     type === 'group' ? loadMembers() : Promise.resolve(),
   ]);
   if (!state.current || state.current.peerId !== peerId) return;
   state.messages = msgs;
-  state.hasMore = msgs.length >= 50;
-  renderMessages({ toBottom: true });
+  state.hasMore = focusId ? true : msgs.length >= 50;
+  state.atLatest = !focusId;
+  renderMessages({ toBottom: !focusId });
+  if (focusId) focusMessage(focusId);
   renderPanel();
   if (conv.unread) markRead(conv);
   $('#input').focus();
@@ -199,7 +238,26 @@ function markRead(conv) {
   api('PATCH', `/api/bots/${state.botId}/conversations/${conv.type}/${encodeURIComponent(conv.peerId)}`, { read: true }).catch(() => {});
 }
 
+function focusMessage(id) {
+  const el = document.querySelector(`.msg[data-id="${Number(id)}"], .sys-msg[data-id="${Number(id)}"]`);
+  if (!el) return;
+  el.scrollIntoView({ block: 'center' });
+  el.classList.add('flash');
+  setTimeout(() => el.classList.remove('flash'), 2000);
+}
+
+// 从搜索结果跳转后，回到最新消息
+async function jumpToLatest() {
+  const c = state.current;
+  if (!c) return;
+  state.messages = await api('GET', `/api/bots/${state.botId}/conversations/${c.type}/${encodeURIComponent(c.peerId)}/messages?limit=50`);
+  state.hasMore = state.messages.length >= 50;
+  state.atLatest = true;
+  renderMessages({ toBottom: true });
+}
+
 function closeConv() {
+  saveDraft();
   state.current = null;
   state.messages = [];
   state.members = [];
@@ -424,11 +482,15 @@ function bindUi() {
   bound = true;
   $('#btn-add-bot').onclick = () => botDialog(null);
   $('#btn-settings').onclick = settingsDialog;
+  $('#btn-automation').onclick = () => automationDialog();
+  $('#btn-card').onclick = cardDialog;
+  $('#btn-keyboard').onclick = keyboardDialog;
   $('#btn-add-conv').onclick = addConvDialog;
   $('#btn-back').onclick = closeConv;
   $('#btn-toggle-panel').onclick = () => togglePanel();
   $('#conv-search').oninput = (e) => {
     state.search = e.target.value;
+    state.searchHits = null;
     state.tab = 'chats';
     renderSidebar();
   };
@@ -438,6 +500,7 @@ function bindUi() {
   }));
   $('#btn-send').onclick = sendCurrent;
   $('#btn-sticker').onclick = (e) => toggleStickerPanel(e.currentTarget);
+  $('#btn-quick').onclick = (e) => toggleQuickPanel(e.currentTarget);
   $('#btn-image').onclick = () => $('#file-image').click();
   $('#btn-file').onclick = () => $('#file-any').click();
   $('#btn-url-media').onclick = urlMediaDialog;
@@ -459,6 +522,7 @@ function bindUi() {
     handleMentionPopup();
     updateHint();
     renderSuggestions();
+    saveDraftSoon();
   });
   input.addEventListener('blur', () => setTimeout(() => $('#mention-pop').classList.add('hidden'), 150));
   input.addEventListener('keydown', (e) => {
@@ -519,6 +583,10 @@ Object.assign(actions, {
   setReply,
   setAttachment,
   sendImage,
+  quickSchedule,
+  setKeyboard,
+  saveDraft,
+  jumpToLatest,
   insertMention,
   recall,
   resend,

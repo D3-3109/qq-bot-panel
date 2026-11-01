@@ -13,6 +13,48 @@ const AUDIT_CODES = new Set([304023, 304024]);
 const PASSIVE_EXPIRED_CODES = new Set([40034024, 40034025, 40034026, 40034128]);
 const FILE_TYPES = { image: 1, video: 2, voice: 3, file: 4 };
 
+const httpsUrl = (u) => /^https:\/\/[^\s]+$/.test(u) && u.length <= 1024;
+
+// 图文卡片（msg_type=8，type=tuwen）
+export function normalizeCard(c) {
+  if (!c) return null;
+  const card = {
+    title: String(c.title || '').trim(),
+    description: String(c.description || '').trim(),
+    url: String(c.url || '').trim(),
+    pic_url: String(c.pic_url || c.picUrl || '').trim(),
+  };
+  const len = (s) => [...s].length;
+  if (len(card.title) < 1 || len(card.title) > 50) throw new HttpError(400, '卡片标题需为 1~50 个字');
+  if (len(card.description) < 1 || len(card.description) > 200) throw new HttpError(400, '卡片描述需为 1~200 个字');
+  if (!httpsUrl(card.url)) throw new HttpError(400, '卡片跳转链接必须是 https 地址');
+  if (!httpsUrl(card.pic_url)) throw new HttpError(400, '卡片图片链接必须是 https 地址');
+  return card;
+}
+
+// 消息按钮：最多 5 行、每行 5 个；type 0=跳转 1=回调 2=指令
+export function normalizeKeyboard(k) {
+  if (!k) return null;
+  if (k.templateId) return { templateId: String(k.templateId).slice(0, 64) };
+  const rows = (Array.isArray(k.rows) ? k.rows : []).slice(0, 5).map((row, ri) =>
+    (Array.isArray(row) ? row : row.buttons || []).slice(0, 5).map((b, bi) => {
+      const type = [0, 1, 2].includes(Number(b.type)) ? Number(b.type) : 2;
+      const label = String(b.label || '').trim();
+      const data = String(b.data || '').trim();
+      if (!label || [...label].length > 10) throw new HttpError(400, '按钮文字需为 1~10 个字');
+      if (!data) throw new HttpError(400, `按钮「${label}」缺少${type === 0 ? '链接' : '数据'}`);
+      if (type === 0 && !/^https?:\/\//.test(data)) throw new HttpError(400, `按钮「${label}」的链接需以 http(s) 开头`);
+      return {
+        id: `b${ri}_${bi}`,
+        render_data: { label, visited_label: String(b.visitedLabel || label).slice(0, 10), style: [0, 1, 3, 4].includes(Number(b.style)) ? Number(b.style) : 1 },
+        action: { type, permission: { type: 2 }, data: data.slice(0, 500), unsupport_tips: '请升级 QQ 后查看', ...(type === 2 ? { enter: !!b.enter } : {}) },
+      };
+    }),
+  ).filter((r) => r.length);
+  if (!rows.length) return null;
+  return { rows: rows.map((buttons) => ({ buttons })) };
+}
+
 // 统一媒体来源：表情收藏 / 媒体库 / 网址 / 直接上传的数据（图片会先存入媒体库以便预览）
 function resolveMedia(input) {
   if (input.stickerId) {
@@ -84,9 +126,14 @@ export async function sendMessage(botId, convType, peerId, input) {
   const replyMode = ['auto', 'passive', 'active'].includes(input.replyMode) ? input.replyMode : 'auto';
   const quoteRow = input.quoteId ? store.getMessage(Number(input.quoteId)) : null;
   if (quoteRow && (quoteRow.botId !== botId || quoteRow.peerId !== peerId)) throw new HttpError(400, '引用的消息不属于该会话');
-  if (!text.trim() && !media) throw new HttpError(400, '消息内容为空');
+  const card = normalizeCard(input.card);
+  const keyboard = normalizeKeyboard(input.keyboard);
+  if (!text.trim() && !media && !card) throw new HttpError(400, '消息内容为空');
+  if (keyboard && !text.trim()) throw new HttpError(400, '按钮消息需要填写文字内容');
 
-  const useMarkdown = !!input.markdown || /<qqbot-at-user\s/.test(text);
+  // 按钮只能挂在 Markdown 消息上
+  const useMarkdown = !!input.markdown || !!keyboard || /<qqbot-at-user\s/.test(text);
+  const origin = ['manual', 'schedule', 'auto', 'forward'].includes(input.origin) ? input.origin : 'manual';
 
   const local = store.insertMessage({
     botId,
@@ -111,6 +158,9 @@ export async function sendMessage(botId, convType, peerId, input) {
           }
         : null,
       quote: quoteRow ? { id: quoteRow.id, authorName: quoteRow.authorName, content: quoteRow.content.slice(0, 100) } : null,
+      card,
+      keyboard,
+      origin,
     },
     quoteIdx: quoteRow?.refIdx || '',
     status: 'sending',
@@ -124,9 +174,13 @@ export async function sendMessage(botId, convType, peerId, input) {
       body.msg_type = 7;
       body.media = { file_info: await uploadMedia(rt, botId, convType, peerId, media) };
       if (text.trim()) body.content = text;
+    } else if (card) {
+      body.msg_type = 8;
+      body.card = { type: 'tuwen', content: card };
     } else if (useMarkdown) {
       body.msg_type = 2;
       body.markdown = { content: text };
+      if (keyboard) body.keyboard = keyboard.templateId ? { id: keyboard.templateId } : { content: { rows: keyboard.rows } };
     } else {
       body.msg_type = 0;
       body.content = text;
@@ -135,8 +189,9 @@ export async function sendMessage(botId, convType, peerId, input) {
 
     let source = null;
     if (replyMode !== 'active') {
+      // 自动回复会指定用触发它的那条消息做被动回复
       source = store.findReplySource(botId, convType, peerId, {
-        msgRowId: quoteRow?.direction === 'in' ? quoteRow.id : undefined,
+        msgRowId: input.replyToRowId || (quoteRow?.direction === 'in' ? quoteRow.id : undefined),
       });
       if (!source && replyMode === 'passive') throw new HttpError(409, '没有可用的被动回复窗口');
     }
@@ -207,7 +262,7 @@ function finish(rowId, patch, botId, convType, peerId) {
   if (msg.status !== 'failed') {
     const conv = store.upsertConversation(botId, convType, peerId, {
       last_ts: msg.ts,
-      last_preview: `我: ${previewOf(msg.content, msg.payload.media ? [{ content_type: msg.payload.media.type === 'image' ? 'image' : msg.payload.media.type }] : [], 0)}`,
+      last_preview: `我: ${msg.payload.card ? `[卡片] ${msg.payload.card.title}` : previewOf(msg.content, msg.payload.media ? [{ content_type: msg.payload.media.type === 'image' ? 'image' : msg.payload.media.type }] : [], 0)}`,
       hidden: 0,
     });
     broadcast('conversation', conv);
